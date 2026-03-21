@@ -39,12 +39,12 @@ type ImageMetadata struct {
 	Objects     []string
 	Coordinates []float32 // [lng, lat]
 	Datetime    time.Time
-	Address     string
+	Address     []string
 	Dimensions  []float32 // [xsize, ysize]
 	Ext         string
 	Size        int32
 	Place       string
-	Colors      []string
+	Colors      string
 	Mood        []string
 	Action      []string
 	ImageVector []float32 // 1024-dim vector
@@ -303,50 +303,50 @@ func (m *LanceDBManager) InsertFileIndexBatch(data []FileIndex) error {
 // buildImageMetadataRecord 构建图片元数据的 Arrow Record
 func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.Record, error) {
 	pool := memory.NewGoAllocator()
-	
+
 	// 创建 builders
 	md5Builder := array.NewStringBuilder(pool)
 	defer md5Builder.Release()
-	
+
 	themeBuilder := array.NewStringBuilder(pool)
 	defer themeBuilder.Release()
-	
+
 	descBuilder := array.NewStringBuilder(pool)
 	defer descBuilder.Release()
-	
+
 	objectsBuilder := array.NewStringBuilder(pool)
 	defer objectsBuilder.Release()
-	
+
 	coordsBuilder := array.NewStringBuilder(pool)
 	defer coordsBuilder.Release()
-	
+
 	datetimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
 	defer datetimeBuilder.Release()
-	
+
 	addressBuilder := array.NewStringBuilder(pool)
 	defer addressBuilder.Release()
-	
+
 	dimensionsBuilder := array.NewStringBuilder(pool)
 	defer dimensionsBuilder.Release()
-	
+
 	extBuilder := array.NewStringBuilder(pool)
 	defer extBuilder.Release()
-	
+
 	sizeBuilder := array.NewInt32Builder(pool)
 	defer sizeBuilder.Release()
-	
+
 	placeBuilder := array.NewStringBuilder(pool)
 	defer placeBuilder.Release()
-	
+
 	colorsBuilder := array.NewStringBuilder(pool)
 	defer colorsBuilder.Release()
-	
+
 	moodBuilder := array.NewStringBuilder(pool)
 	defer moodBuilder.Release()
-	
+
 	actionBuilder := array.NewStringBuilder(pool)
 	defer actionBuilder.Release()
-	
+
 	// 向量使用 FixedSizeList 存储
 	vectorBuilder := array.NewFixedSizeListBuilder(pool, VectorDimension, arrow.PrimitiveTypes.Float32)
 	defer vectorBuilder.Release()
@@ -360,15 +360,15 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 		objectsBuilder.Append(marshalStringSlice(item.Objects))
 		coordsBuilder.Append(marshalFloat32SliceToJSON(item.Coordinates))
 		datetimeBuilder.Append(arrow.Timestamp(item.Datetime.UnixMicro()))
-		addressBuilder.Append(item.Address)
+		addressBuilder.Append(marshalStringSlice(item.Address))
 		dimensionsBuilder.Append(marshalFloat32SliceToJSON(item.Dimensions))
 		extBuilder.Append(item.Ext)
 		sizeBuilder.Append(item.Size)
 		placeBuilder.Append(item.Place)
-		colorsBuilder.Append(marshalStringSlice(item.Colors))
+		colorsBuilder.Append(item.Colors)
 		moodBuilder.Append(marshalStringSlice(item.Mood))
 		actionBuilder.Append(marshalStringSlice(item.Action))
-		
+
 		// 添加向量
 		vectorBuilder.Append(true)
 		for _, v := range item.ImageVector {
@@ -419,31 +419,31 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 // buildFaceVectorRecord 构建人脸向量的 Arrow Record
 func (m *LanceDBManager) buildFaceVectorRecord(data []FaceVector) (arrow.Record, error) {
 	pool := memory.NewGoAllocator()
-	
+
 	faceIDBuilder := array.NewStringBuilder(pool)
 	defer faceIDBuilder.Release()
-	
+
 	md5Builder := array.NewStringBuilder(pool)
 	defer md5Builder.Release()
-	
+
 	// 向量使用 FixedSizeList 存储
 	vectorBuilder := array.NewFixedSizeListBuilder(pool, VectorDimension, arrow.PrimitiveTypes.Float32)
 	defer vectorBuilder.Release()
 	vectorValueBuilder := vectorBuilder.ValueBuilder().(*array.Float32Builder)
-	
+
 	boxBuilder := array.NewStringBuilder(pool)
 	defer boxBuilder.Release()
 
 	for _, item := range data {
 		faceIDBuilder.Append(item.FaceID)
 		md5Builder.Append(item.MD5)
-		
+
 		// 添加向量
 		vectorBuilder.Append(true)
 		for _, v := range item.FaceVector {
 			vectorValueBuilder.Append(v)
 		}
-		
+
 		boxBuilder.Append(marshalFloat32SliceToJSON(item.Box))
 	}
 
@@ -467,10 +467,10 @@ func (m *LanceDBManager) buildFaceVectorRecord(data []FaceVector) (arrow.Record,
 // buildFileIndexRecord 构建文件索引的 Arrow Record
 func (m *LanceDBManager) buildFileIndexRecord(data []FileIndex) (arrow.Record, error) {
 	pool := memory.NewGoAllocator()
-	
+
 	md5Builder := array.NewStringBuilder(pool)
 	defer md5Builder.Release()
-	
+
 	pathBuilder := array.NewStringBuilder(pool)
 	defer pathBuilder.Release()
 
@@ -499,6 +499,16 @@ func marshalStringSlice(s []string) string {
 	}
 	bytes, _ := json.Marshal(s)
 	return string(bytes)
+}
+
+// unmarshalStringSlice 将 JSON 字符串反序列化为字符串切片
+func unmarshalStringSlice(s string) []string {
+	if s == "" || s == "[]" {
+		return []string{}
+	}
+	var result []string
+	json.Unmarshal([]byte(s), &result)
+	return result
 }
 
 // marshalFloat32SliceToJSON 将 float32 切片序列化为 JSON 字符串
@@ -650,7 +660,7 @@ func (m *LanceDBManager) DeleteByMD5(md5 string) error {
 // parseImageMetadata 解析图片元数据
 func (m *LanceDBManager) parseImageMetadata(data map[string]interface{}) (*ImageMetadata, error) {
 	result := &ImageMetadata{}
-	
+
 	if v, ok := data["md5"].(string); ok {
 		result.MD5 = v
 	}
@@ -658,7 +668,7 @@ func (m *LanceDBManager) parseImageMetadata(data map[string]interface{}) (*Image
 		result.Description = v
 	}
 	if v, ok := data["address"].(string); ok {
-		result.Address = v
+		result.Address = unmarshalStringSlice(v)
 	}
 	if v, ok := data["ext"].(string); ok {
 		result.Ext = v
@@ -669,26 +679,26 @@ func (m *LanceDBManager) parseImageMetadata(data map[string]interface{}) (*Image
 	if v, ok := data["size"].(int32); ok {
 		result.Size = v
 	}
-	
+
 	// 解析时间戳
 	if v, ok := data["datetime"].(arrow.Timestamp); ok {
 		result.Datetime = time.UnixMicro(int64(v))
 	}
-	
+
 	return result, nil
 }
 
 // parseFaceVector 解析人脸向量
 func (m *LanceDBManager) parseFaceVector(data map[string]interface{}) (*FaceVector, error) {
 	result := &FaceVector{}
-	
+
 	if v, ok := data["face_id"].(string); ok {
 		result.FaceID = v
 	}
 	if v, ok := data["md5"].(string); ok {
 		result.MD5 = v
 	}
-	
+
 	return result, nil
 }
 

@@ -93,19 +93,9 @@ type GenerateResponse struct {
 // ImageAnalysisResult 图片分析结果
 type ImageAnalysisResult struct {
 	Content   string
+	ParsedData *ImageAnalysisData
 	Model     string
 	CreatedAt time.Time
-}
-
-// ImageAnalysisSchema 图片分析的 JSON Schema 结构
-type ImageAnalysisSchema struct {
-	Description string   `json:"description"`
-	Theme       []string `json:"theme"`
-	Objects     []string `json:"objects"`
-	Action      []string `json:"action"`
-	Mood        []string `json:"mood"`
-	Colors      string   `json:"colors"`
-	Address     []string `json:"address"`
 }
 
 // NewOllamaClient 创建新的 Ollama 客户端
@@ -312,19 +302,19 @@ func (c *OllamaClient) doRequest(ctx context.Context, req GenerateRequest) (*Gen
 	return &genResp, nil
 }
 
-// validateJSONSchema 验证响应内容是否符合 JSON Schema 定义
-func validateJSONSchema(content string) error {
-	var schema ImageAnalysisSchema
-	if err := json.Unmarshal([]byte(content), &schema); err != nil {
-		return fmt.Errorf("JSON 解析失败: %w", err)
+// validateAndParseJSON 验证并解析 JSON 内容，返回解析后的数据
+func validateAndParseJSON(content string) (*ImageAnalysisData, error) {
+	data, err := ParseAnalysisResult(content)
+	if err != nil {
+		return nil, fmt.Errorf("JSON 解析失败: %w", err)
 	}
 
 	// 检查必要字段是否存在（description 是核心字段）
-	if schema.Description == "" {
-		return fmt.Errorf("JSON 缺少必要字段: description 为空")
+	if data.Description == "" {
+		return nil, fmt.Errorf("JSON 缺少必要字段: description 为空")
 	}
 
-	return nil
+	return data, nil
 }
 
 // sendRequest 发送非流式请求，包含重试逻辑
@@ -342,13 +332,16 @@ func (c *OllamaClient) sendRequest(ctx context.Context, req GenerateRequest) (*I
 	}
 
 	// 如果响应为空或 JSON 解析失败，等待300ms后重试一次
+	var parsedData *ImageAnalysisData
 	needRetry := false
 	if content == "" {
 		c.logger.Warnw("模型返回空响应")
 		needRetry = true
 	} else {
-		// 验证 JSON Schema
-		if err := validateJSONSchema(content); err != nil {
+		// 验证并解析 JSON
+		var err error
+		parsedData, err = validateAndParseJSON(content)
+		if err != nil {
 			c.logger.Warnw("模型返回的 JSON 不符合 Schema", "error", err, "content", content)
 			needRetry = true
 		}
@@ -376,8 +369,10 @@ func (c *OllamaClient) sendRequest(ctx context.Context, req GenerateRequest) (*I
 			return nil, fmt.Errorf("图片处理失败")
 		}
 
-		// 再次验证 JSON Schema
-		if err := validateJSONSchema(content); err != nil {
+		// 再次验证并解析 JSON
+		var err error
+		parsedData, err = validateAndParseJSON(content)
+		if err != nil {
 			c.logger.Errorw("重试后模型返回的 JSON 仍然不符合 Schema", "error", err, "content", content)
 			return nil, fmt.Errorf("图片处理失败")
 		}
@@ -386,9 +381,10 @@ func (c *OllamaClient) sendRequest(ctx context.Context, req GenerateRequest) (*I
 	createdAt, _ := time.Parse(time.RFC3339, genResp.CreatedAt)
 
 	return &ImageAnalysisResult{
-		Content:   content,
-		Model:     genResp.Model,
-		CreatedAt: createdAt,
+		Content:    content,
+		ParsedData: parsedData,
+		Model:      genResp.Model,
+		CreatedAt:  createdAt,
 	}, nil
 }
 
@@ -712,23 +708,16 @@ func main() {
 		return
 	}
 
-	// 解析视觉分析结果
-	Logger.Infow("解析视觉分析结果")
-	analysisData, err := extractor.ParseAnalysisResult(result.Content)
-	if err != nil {
-		Logger.Warnw("解析分析结果失败，使用原始内容", "error", err)
-		analysisData = &ImageAnalysisData{
-			Description: result.Content,
-			Theme:       []string{},
-			Objects:     []string{},
-			Action:      []string{},
-			Mood:        []string{},
-			Colors:      []string{},
-		}
+	// 使用已解析的视觉分析结果
+	Logger.Infow("使用已解析的视觉分析结果")
+	if result.ParsedData == nil {
+		Logger.Errorw("解析结果为空")
+		fmt.Fprintf(os.Stderr, "错误: 解析结果为空\n")
+		os.Exit(1)
 	}
 
 	// 合并元数据
-	completeMetadata := extractor.MergeMetadata(basicInfo, analysisData)
+	completeMetadata := extractor.MergeMetadata(basicInfo, result.ParsedData)
 
 	// 生成图片向量（TODO: 集成实际的向量生成服务）
 	// 目前使用零向量作为占位符

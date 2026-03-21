@@ -138,7 +138,7 @@ func (p *ImagePipeline) ProcessImage(ctx context.Context, imagePath string) (*Im
 			Objects:     []string{},
 			Action:      []string{},
 			Mood:        []string{},
-			Colors:      []string{},
+			Colors:      "",
 		}
 	}
 
@@ -233,7 +233,7 @@ func (p *ImagePipeline) parseAnalysisContent(content string) (*ImageAnalysisData
 		Objects: []string{},
 		Action:  []string{},
 		Mood:    []string{},
-		Colors:  []string{},
+		Colors:  "",
 	}
 
 	// 尝试从内容中提取 JSON
@@ -249,8 +249,8 @@ func (p *ImagePipeline) parseAnalysisContent(content string) (*ImageAnalysisData
 			Objects     []string `json:"objects"`
 			Action      []string `json:"action"`
 			Mood        []string `json:"mood"`
-			Colors      []string `json:"colors"`
-			Address     string   `json:"address"`
+			Colors      string   `json:"colors"`
+			Address     []string `json:"address"`
 			Place       string   `json:"place"`
 		}
 		

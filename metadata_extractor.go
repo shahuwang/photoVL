@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -35,14 +36,14 @@ type ImageBasicInfo struct {
 
 // ImageAnalysisData 视觉分析结果数据
 type ImageAnalysisData struct {
-	Description string
-	Theme       []string
-	Objects     []string
-	Action      []string
-	Mood        []string
-	Colors      []string
-	Address     string
-	Place       string
+	Description string   `json:"description"`
+	Theme       []string `json:"theme"`
+	Objects     []string `json:"objects"`
+	Action      []string `json:"action"`
+	Mood        []string `json:"mood"`
+	Colors      string   `json:"colors"`
+	Address     []string `json:"address"`
+	Place       string   `json:"place"`
 	ImageVector []float32
 }
 
@@ -117,6 +118,12 @@ func (e *MetadataExtractor) ExtractEXIFData(filePath string) (*ImageBasicInfo, e
 	}
 	defer file.Close()
 
+	// 获取文件信息（用于获取修改时间）
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("获取文件信息失败: %w", err)
+	}
+
 	info := &ImageBasicInfo{
 		Coordinates: []float32{},
 	}
@@ -127,6 +134,9 @@ func (e *MetadataExtractor) ExtractEXIFData(filePath string) (*ImageBasicInfo, e
 		// 很多图片可能没有 EXIF 信息，这不是错误
 		e.logger.Debugw("图片没有 EXIF 信息或解析失败", "path", filePath, "error", err)
 		info.HasEXIF = false
+		// 使用文件修改时间作为拍摄时间
+		info.Datetime = fileInfo.ModTime()
+		e.logger.Debugw("使用文件修改时间作为拍摄时间", "path", filePath, "datetime", info.Datetime)
 		return info, nil
 	}
 
@@ -136,6 +146,10 @@ func (e *MetadataExtractor) ExtractEXIFData(filePath string) (*ImageBasicInfo, e
 	if tm, err := x.DateTime(); err == nil {
 		info.Datetime = tm
 		e.logger.Debugw("提取到拍摄时间", "path", filePath, "datetime", tm)
+	} else {
+		// EXIF 中没有拍摄时间，使用文件修改时间
+		info.Datetime = fileInfo.ModTime()
+		e.logger.Debugw("EXIF 无拍摄时间，使用文件修改时间", "path", filePath, "datetime", info.Datetime)
 	}
 
 	// 提取 GPS 坐标
@@ -270,27 +284,15 @@ func (e *MetadataExtractor) ExtractAllMetadata(filePath string) (*ImageBasicInfo
 }
 
 // ParseAnalysisResult 解析视觉分析结果（从模型返回的 JSON）
-func (e *MetadataExtractor) ParseAnalysisResult(content string) (*ImageAnalysisData, error) {
-	// 这里假设模型返回的是 JSON 格式
-	// 根据 prompt 的设计，可能需要调整解析逻辑
+func ParseAnalysisResult(content string) (*ImageAnalysisData, error) {
+	content = strings.TrimSpace(content)
 
-	data := &ImageAnalysisData{
-		Theme:   []string{},
-		Objects: []string{},
-		Action:  []string{},
-		Mood:    []string{},
-		Colors:  []string{},
+	var data ImageAnalysisData
+	if err := json.Unmarshal([]byte(content), &data); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	// 尝试解析 JSON
-	// 注意：这里需要根据实际的模型输出格式进行调整
-	// 如果模型返回的是结构化 JSON，可以直接解析
-	// 如果返回的是文本，需要提取关键信息
-
-	// 简单处理：将内容作为描述
-	data.Description = strings.TrimSpace(content)
-
-	return data, nil
+	return &data, nil
 }
 
 // MergeMetadata 合并基础元数据和视觉分析结果
@@ -303,12 +305,6 @@ func (e *MetadataExtractor) MergeMetadata(basic *ImageBasicInfo, analysis *Image
 
 // ToImageMetadata 转换为数据库存储格式
 func (c *CompleteImageMetadata) ToImageMetadata() *ImageMetadata {
-	// 转换颜色为字符串列表
-	colors := c.Colors
-	if colors == nil {
-		colors = []string{}
-	}
-
 	// 转换坐标为 float32 切片
 	var coordinates []float32
 	if len(c.Coordinates) == 2 {
@@ -336,7 +332,7 @@ func (c *CompleteImageMetadata) ToImageMetadata() *ImageMetadata {
 		Ext:         c.Ext,
 		Size:        int32(c.Size),
 		Place:       c.Place,
-		Colors:      colors,
+		Colors:      c.Colors,
 		Mood:        c.Mood,
 		Action:      c.Action,
 		ImageVector: c.ImageVector,
