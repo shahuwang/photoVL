@@ -775,9 +775,8 @@ func saveNewImage(appCtx *AppContext, basicInfo *ImageBasicInfo, result *ImageAn
 	// 合并元数据
 	completeMetadata := appCtx.Extractor.MergeMetadata(basicInfo, result.ParsedData)
 
-	// 生成图片向量（TODO: 集成实际的向量生成服务）
-	// 目前使用零向量作为占位符
-	completeMetadata.ImageVector = make([]float32, VectorDimension)
+	// 图片向量保持为空，等待后续向量生成服务集成
+	// 空向量表示尚未生成向量，比全零向量更易区分
 
 	// 保存到数据库
 	Logger.Infow("保存到数据库")

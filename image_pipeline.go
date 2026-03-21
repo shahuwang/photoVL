@@ -145,9 +145,7 @@ func (p *ImagePipeline) ProcessImage(ctx context.Context, imagePath string) (*Im
 	// 6. 合并元数据
 	completeMetadata := p.extractor.MergeMetadata(basicInfo, analysisData)
 
-	// 7. 生成图片向量（这里使用简单的占位符，实际应该调用向量生成服务）
-	// TODO: 集成实际的向量生成服务
-	completeMetadata.ImageVector = make([]float32, VectorDimension)
+	// 7. 图片向量保持为空，等待后续向量生成服务集成
 
 	// 8. 存入数据库
 	if err := p.saveToDatabase(completeMetadata, imagePath); err != nil {
