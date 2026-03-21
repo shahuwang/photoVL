@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"time"
-	"unsafe"
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
@@ -260,7 +259,7 @@ func (m *LanceDBManager) InsertImageMetadata(data *ImageMetadata) error {
 			return nil
 		}
 		data = existing
-		
+
 		// 删除旧记录，然后插入新记录（LanceDB 的 merge_insert 替代方案）
 		if err := m.deleteImageMetadataByMD5(data.MD5); err != nil {
 			return fmt.Errorf("failed to delete old metadata: %w", err)
@@ -769,21 +768,6 @@ func marshalFloat32SliceToJSON(f []float32) string {
 	return string(bytes)
 }
 
-// marshalFloat32SliceToBytes 将 float32 切片序列化为二进制
-func marshalFloat32SliceToBytes(f []float32) []byte {
-	// 每个 float32 占 4 字节
-	result := make([]byte, len(f)*4)
-	for i, v := range f {
-		// 简单的小端序编码
-		bits := *(*uint32)(unsafe.Pointer(&v))
-		result[i*4] = byte(bits)
-		result[i*4+1] = byte(bits >> 8)
-		result[i*4+2] = byte(bits >> 16)
-		result[i*4+3] = byte(bits >> 24)
-	}
-	return result
-}
-
 // GetImageMetadataByMD5 根据 MD5 获取图片元数据
 func (m *LanceDBManager) GetImageMetadataByMD5(md5 string) (*ImageMetadata, error) {
 	tbl, err := m.db.OpenTable(m.ctx, TableImageMetadata)
@@ -992,7 +976,7 @@ func parseTimestampFromArrow(v interface{}) time.Time {
 	if v == nil {
 		return time.Time{}
 	}
-	
+
 	// 尝试直接解析为时间戳值
 	switch t := v.(type) {
 	case int64:
@@ -1004,13 +988,13 @@ func parseTimestampFromArrow(v interface{}) time.Time {
 	case time.Time:
 		return t.Local()
 	}
-	
+
 	// 尝试解析为 Arrow 数组（LanceDB 返回的是数组）
 	if arr, ok := v.(arrow.Array); ok {
 		if arr.Len() == 0 || arr.IsNull(0) {
 			return time.Time{}
 		}
-		
+
 		switch a := arr.(type) {
 		case *array.Int64:
 			return time.UnixMicro(a.Value(0)).Local()
@@ -1021,7 +1005,7 @@ func parseTimestampFromArrow(v interface{}) time.Time {
 			return time.Time{}
 		}
 	}
-	
+
 	Logger.Warnw("parseTimestampFromArrow: unknown type", "type", fmt.Sprintf("%T", v), "value", v)
 	return time.Time{}
 }
