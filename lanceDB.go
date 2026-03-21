@@ -299,8 +299,37 @@ func (m *LanceDBManager) InsertFaceVectors(data []FaceVector) error {
 }
 
 // InsertFileIndex 插入文件索引
+// 如果 MD5 存在但 file_path 不同，则插入新记录（同一文件多个路径）
+// 如果 MD5 和 file_path 都已存在，则跳过
 func (m *LanceDBManager) InsertFileIndex(data *FileIndex) error {
+	// 检查是否已存在相同的 MD5 + file_path 组合
+	exists, err := m.checkFileIndexExists(data.MD5, data.FilePath)
+	if err != nil {
+		return fmt.Errorf("failed to check file index existence: %w", err)
+	}
+	if exists {
+		// 已存在相同的 MD5 + file_path 组合，跳过插入
+		return nil
+	}
 	return m.InsertFileIndexBatch([]FileIndex{*data})
+}
+
+// checkFileIndexExists 检查指定的 MD5 + file_path 组合是否已存在
+func (m *LanceDBManager) checkFileIndexExists(md5, filePath string) (bool, error) {
+	tbl, err := m.db.OpenTable(m.ctx, TableFileIndex)
+	if err != nil {
+		return false, fmt.Errorf("failed to open table %s: %w", TableFileIndex, err)
+	}
+	defer tbl.Close()
+
+	// 使用 SQL 过滤查询
+	filter := fmt.Sprintf("md5 = '%s' AND file_path = '%s'", md5, filePath)
+	results, err := tbl.SelectWithFilter(m.ctx, filter)
+	if err != nil {
+		return false, fmt.Errorf("failed to query file index: %w", err)
+	}
+
+	return len(results) > 0, nil
 }
 
 // InsertFileIndexBatch 批量插入文件索引
