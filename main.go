@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,11 +114,6 @@ func NewOllamaClient(baseURL, model string) *OllamaClient {
 		baseURL = "http://localhost:11434"
 	}
 
-	// Logger.Debugw("创建 Ollama 客户端",
-	// 	"baseURL", baseURL,
-	// 	"model", model,
-	// )
-
 	return &OllamaClient{
 		BaseURL: baseURL,
 		Model:   model,
@@ -144,8 +140,6 @@ var imageProcessor *ImageProcessor
 
 // encodeImageToBase64 将图片文件编码为 base64（自动处理缩放）
 func encodeImageToBase64(imagePath string) (string, error) {
-	// Logger.Debugw("开始处理图片", "path", imagePath)
-
 	if imageProcessor == nil {
 		imageProcessor = NewImageProcessor(1024, 85)
 	}
@@ -165,11 +159,6 @@ func encodeImageToBase64(imagePath string) (string, error) {
 
 // AnalyzeImage 分析单张图片
 func (c *OllamaClient) AnalyzeImage(ctx context.Context, imagePath, prompt string) (*ImageAnalysisResult, error) {
-	// c.logger.Infow("开始分析图片",
-	// 	"imagePath", imagePath,
-	// 	"model", c.Model,
-	// )
-
 	base64Image, err := encodeImageToBase64(imagePath)
 	if err != nil {
 		return nil, err
@@ -206,13 +195,6 @@ func (c *OllamaClient) AnalyzeImage(ctx context.Context, imagePath, prompt strin
 
 // AnalyzeImageWithPrompt 使用自定义提示词分析图片
 func (c *OllamaClient) AnalyzeImageWithPrompt(ctx context.Context, imagePath, prompt string, opts Options) (*ImageAnalysisResult, error) {
-	// c.logger.Infow("使用自定义选项分析图片",
-	// 	"imagePath", imagePath,
-	// 	"temperature", opts.Temperature,
-	// 	"topP", opts.TopP,
-	// 	"maxTokens", opts.MaxTokens,
-	// )
-
 	base64Image, err := encodeImageToBase64(imagePath)
 	if err != nil {
 		return nil, err
@@ -231,10 +213,6 @@ func (c *OllamaClient) AnalyzeImageWithPrompt(ctx context.Context, imagePath, pr
 
 // AnalyzeImages 分析多张图片
 func (c *OllamaClient) AnalyzeImages(ctx context.Context, imagePaths []string, prompt string) (*ImageAnalysisResult, error) {
-	// c.logger.Infow("开始分析多张图片",
-	// 	"count", len(imagePaths),
-	// )
-
 	if len(imagePaths) == 0 {
 		c.logger.Errorw("未提供图片路径")
 		return nil, fmt.Errorf("至少需要提供一张图片")
@@ -242,7 +220,6 @@ func (c *OllamaClient) AnalyzeImages(ctx context.Context, imagePaths []string, p
 
 	var base64Images []string
 	for _, path := range imagePaths {
-		// c.logger.Debugw("编码第 N 张图片", "index", i+1, "path", path)
 		base64Image, err := encodeImageToBase64(path)
 		if err != nil {
 			return nil, err
@@ -341,12 +318,12 @@ func validateJSONSchema(content string) error {
 	if err := json.Unmarshal([]byte(content), &schema); err != nil {
 		return fmt.Errorf("JSON 解析失败: %w", err)
 	}
-	
+
 	// 检查必要字段是否存在（description 是核心字段）
 	if schema.Description == "" {
 		return fmt.Errorf("JSON 缺少必要字段: description 为空")
 	}
-	
+
 	return nil
 }
 
@@ -516,8 +493,6 @@ func (c *OllamaClient) streamRequest(ctx context.Context, req GenerateRequest, c
 
 // CheckHealth 检查 Ollama 服务是否健康
 func (c *OllamaClient) CheckHealth() error {
-	// c.logger.Debugw("检查 Ollama 服务健康状态", "url", c.BaseURL)
-
 	resp, err := c.HTTPClient.Get(c.BaseURL + "/api/tags")
 	if err != nil {
 		c.logger.Errorw("无法连接到 Ollama 服务", "error", err)
@@ -539,25 +514,8 @@ func (r *ImageAnalysisResult) String() string {
 	return fmt.Sprintf("Model: %s\nCreated: %s\nContent: %s", r.Model, r.CreatedAt.Format("2006-01-02 15:04:05"), r.Content)
 }
 
-func printUsage() {
-	fmt.Println("用法:")
-	fmt.Println("  go run main.go <图片路径> [提示词]              分析图片（直接提供提示词）")
-	fmt.Println("  go run main.go --prompt-file <文件> <图片路径>  从文件读取提示词分析图片")
-	fmt.Println("  go run main.go --info <图片路径>                查看图片信息")
-	fmt.Println("")
-	fmt.Println("示例:")
-	fmt.Println("  go run main.go ./test.jpg '请描述这张图片'")
-	fmt.Println("  go run main.go --prompt-file prompt.txt ./test.jpg")
-	fmt.Println("  go run main.go -p prompt.txt ./test.png")
-	fmt.Println("  go run main.go --info ./test.heic")
-	fmt.Println("")
-	fmt.Println("支持的格式: jpg, jpeg, png, webp, heic, heif")
-}
-
 // readPromptFromFile 从文件读取提示词
 func readPromptFromFile(path string) (string, error) {
-	// Logger.Debugw("读取提示词文件", "path", path)
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		Logger.Errorw("读取提示词文件失败", "path", path, "error", err)
@@ -569,11 +527,6 @@ func readPromptFromFile(path string) (string, error) {
 		Logger.Warnw("提示词文件为空", "path", path)
 		return "", fmt.Errorf("提示词文件为空")
 	}
-
-	// Logger.Infow("提示词文件读取成功",
-	// 	"path", path,
-	// 	"length", len(prompt),
-	// )
 
 	return prompt, nil
 }
@@ -608,137 +561,112 @@ func max(a, b int) int {
 	return b
 }
 
+// Config 命令行配置
+type Config struct {
+	ImagePath   string
+	DBPath      string
+	Prompt      string
+	PromptFile  string
+	ShowInfo    bool
+	OllamaURL   string
+	OllamaModel string
+}
+
+// parseFlags 解析命令行参数
+func parseFlags() *Config {
+	cfg := &Config{}
+
+	flag.StringVar(&cfg.ImagePath, "fpath", "", "要处理的图片路径")
+	flag.StringVar(&cfg.DBPath, "db", "photoVL_lancedb", "LanceDB 数据库路径")
+	flag.StringVar(&cfg.Prompt, "prompt", "", "分析提示词（直接提供）")
+	flag.StringVar(&cfg.PromptFile, "p", "", "提示词文件路径")
+	flag.BoolVar(&cfg.ShowInfo, "info", false, "仅显示图片信息，不进行分析")
+	flag.StringVar(&cfg.OllamaURL, "ollama-url", "http://localhost:11434", "Ollama 服务地址")
+	flag.StringVar(&cfg.OllamaModel, "model", "qwen3-vl:4b", "Ollama 模型名称")
+
+	flag.Parse()
+	return cfg
+}
+
 func main() {
 	// 初始化日志
 	Logger = initLogger()
 	defer Logger.Sync()
 
-	// Logger.Infow("程序启动", "version", "1.0.0")
+	// 解析命令行参数
+	cfg := parseFlags()
 
-	// 检查命令行参数
-	if len(os.Args) < 2 {
-		Logger.Errorw("缺少必要的命令行参数")
-		printUsage()
+	// 检查必需参数
+	if cfg.ImagePath == "" {
+		fmt.Fprintf(os.Stderr, "错误: 缺少必需参数 -fpath\n\n")
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	// 处理 --info 参数
-	if os.Args[1] == "--info" || os.Args[1] == "-i" {
-		if len(os.Args) < 3 {
-			Logger.Errorw("缺少图片路径参数")
-			printUsage()
-			os.Exit(1)
-		}
-		imagePath := os.Args[2]
+	// 验证图片文件是否存在
+	if _, err := os.Stat(cfg.ImagePath); os.IsNotExist(err) {
+		Logger.Errorw("图片文件不存在", "path", cfg.ImagePath)
+		fmt.Fprintf(os.Stderr, "错误: 图片文件不存在: %s\n", cfg.ImagePath)
+		os.Exit(1)
+	}
 
-		// 验证图片文件是否存在
-		if _, err := os.Stat(imagePath); os.IsNotExist(err) {
-			Logger.Errorw("图片文件不存在", "path", imagePath)
-			os.Exit(1)
-		}
-
-		showImageInfo(imagePath)
+	// 处理 --info 参数（仅显示图片信息）
+	if cfg.ShowInfo {
+		showImageInfo(cfg.ImagePath)
 		return
 	}
 
 	// 创建 Ollama 客户端
-	client := NewOllamaClient("http://localhost:11434", "qwen3-vl:4b")
+	client := NewOllamaClient(cfg.OllamaURL, cfg.OllamaModel)
 
 	// 检查服务健康状态
-	// Logger.Infow("正在检查 Ollama 服务...")
 	if err := client.CheckHealth(); err != nil {
 		Logger.Errorw("Ollama 服务连接失败", "error", err)
-		Logger.Infow("请确保 Ollama 服务已启动", "command", "ollama run qwen3-vl:4b")
+		fmt.Fprintf(os.Stderr, "错误: 无法连接到 Ollama 服务 (%s)\n", cfg.OllamaURL)
+		fmt.Fprintf(os.Stderr, "请确保 Ollama 服务已启动: ollama run %s\n", cfg.OllamaModel)
 		os.Exit(1)
 	}
-	// Logger.Infow("Ollama 服务连接成功")
 
-	// 解析命令行参数
-	var imagePath string
+	// 处理提示词
 	var prompt string
-	var promptFile string
-
-	// 检查是否有 --prompt-file 或 -p 参数
-	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "--prompt-file" || os.Args[i] == "-p" {
-			if i+1 >= len(os.Args) {
-				Logger.Errorw("缺少提示词文件路径")
-				printUsage()
-				os.Exit(1)
-			}
-			promptFile = os.Args[i+1]
-			// 移除这两个参数，重新整理参数列表
-			os.Args = append(os.Args[:i], os.Args[i+2:]...)
-			break
-		}
-	}
-
-	// 重新检查参数数量
-	if len(os.Args) < 2 {
-		Logger.Errorw("缺少必要的命令行参数")
-		printUsage()
-		os.Exit(1)
-	}
-
-	imagePath = os.Args[1]
-
-	// 如果指定了提示词文件，从文件读取
-	if promptFile != "" {
+	if cfg.PromptFile != "" {
 		var err error
-		prompt, err = readPromptFromFile(promptFile)
+		prompt, err = readPromptFromFile(cfg.PromptFile)
 		if err != nil {
 			Logger.Errorw("无法读取提示词文件", "error", err)
+			fmt.Fprintf(os.Stderr, "错误: 无法读取提示词文件: %v\n", err)
 			os.Exit(1)
 		}
-	} else if len(os.Args) >= 3 {
-		// 从命令行参数获取提示词
-		prompt = os.Args[2]
+	} else if cfg.Prompt != "" {
+		prompt = cfg.Prompt
 	} else {
 		// 使用默认提示词
 		prompt = "请详细描述这张图片中的内容，包括主要物体、场景、颜色、文字等细节。"
 	}
 
 	Logger.Infow("解析命令行参数",
-		"imagePath", imagePath,
-		"promptFile", promptFile,
+		"imagePath", cfg.ImagePath,
+		"dbPath", cfg.DBPath,
+		"promptFile", cfg.PromptFile,
 		"promptLength", len(prompt),
 	)
 
-	// 验证图片文件是否存在
-	if _, err := os.Stat(imagePath); os.IsNotExist(err) {
-		Logger.Errorw("图片文件不存在", "path", imagePath)
-		os.Exit(1)
-	}
-
-	Logger.Infow("图片文件存在", "path", imagePath)
+	Logger.Infow("图片文件存在", "path", cfg.ImagePath)
 
 	ctx := context.Background()
 
-	// 方式1: 非流式调用
+	// 非流式调用
 	Logger.Infow("开始非流式图片分析")
-	result, err := client.AnalyzeImage(ctx, imagePath, prompt)
+	result, err := client.AnalyzeImage(ctx, cfg.ImagePath, prompt)
 	if err != nil {
 		Logger.Errorw("分析失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 分析失败: %v\n", err)
 		os.Exit(1)
 	}
 
 	fmt.Println("\n=== 分析结果 ===")
 	fmt.Printf("模型: %s\n", result.Model)
 	fmt.Printf("分析内容:\n%s\n", result.Content)
-
-	// // 方式2: 流式调用示例（可选）
-	fmt.Println("\n=== 流式输出示例 ===")
-	Logger.Infow("开始流式图片分析")
-
-	err = client.StreamAnalyzeImage(ctx, imagePath, prompt, func(chunk string) {
-		fmt.Print(chunk)
-	})
-	if err != nil {
-		Logger.Errorw("流式分析失败", "error", err)
-	} else {
-		Logger.Infow("流式分析完成")
-	}
-	fmt.Println()
 
 	Logger.Infow("程序结束")
 }
