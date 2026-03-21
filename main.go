@@ -554,13 +554,6 @@ func showImageInfo(path string) {
 	}
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // Config 命令行配置
 type Config struct {
 	ImagePath   string
@@ -668,5 +661,99 @@ func main() {
 	fmt.Printf("模型: %s\n", result.Model)
 	fmt.Printf("分析内容:\n%s\n", result.Content)
 
-	Logger.Infow("程序结束")
+	// 初始化数据库
+	var dbPath string
+	if cfg.DBPath != "" {
+		dbPath = cfg.DBPath
+	} else {
+		dbPath = GetDefaultDBPath()
+	}
+
+	Logger.Infow("初始化数据库", "path", dbPath)
+	db, err := NewLanceDBManager(dbPath)
+	if err != nil {
+		Logger.Errorw("初始化数据库失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 初始化数据库失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	// 提取图片基础元数据
+	Logger.Infow("提取图片基础元数据")
+	extractor := NewMetadataExtractor()
+	basicInfo, err := extractor.ExtractAllMetadata(cfg.ImagePath)
+	if err != nil {
+		Logger.Errorw("提取元数据失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 提取元数据失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 检查 MD5 是否已存在
+	exists, err := db.CheckMD5Exists(basicInfo.MD5)
+	if err != nil {
+		Logger.Errorw("检查 MD5 存在性失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 检查 MD5 存在性失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if exists {
+		Logger.Infow("检测到重复文件，仅更新文件索引", "md5", basicInfo.MD5)
+		fileIndex := &FileIndex{
+			MD5:      basicInfo.MD5,
+			FilePath: cfg.ImagePath,
+		}
+		if err := db.InsertFileIndex(fileIndex); err != nil {
+			Logger.Errorw("插入文件索引失败", "error", err)
+			fmt.Fprintf(os.Stderr, "错误: 插入文件索引失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("\n图片已存在（重复文件），已更新文件索引")
+		Logger.Infow("程序结束")
+		return
+	}
+
+	// 解析视觉分析结果
+	Logger.Infow("解析视觉分析结果")
+	analysisData, err := extractor.ParseAnalysisResult(result.Content)
+	if err != nil {
+		Logger.Warnw("解析分析结果失败，使用原始内容", "error", err)
+		analysisData = &ImageAnalysisData{
+			Description: result.Content,
+			Theme:       []string{},
+			Objects:     []string{},
+			Action:      []string{},
+			Mood:        []string{},
+			Colors:      []string{},
+		}
+	}
+
+	// 合并元数据
+	completeMetadata := extractor.MergeMetadata(basicInfo, analysisData)
+
+	// 生成图片向量（TODO: 集成实际的向量生成服务）
+	// 目前使用零向量作为占位符
+	completeMetadata.ImageVector = make([]float32, VectorDimension)
+
+	// 保存到数据库
+	Logger.Infow("保存到数据库")
+	imageMeta := completeMetadata.ToImageMetadata()
+	if err := db.InsertImageMetadata(imageMeta); err != nil {
+		Logger.Errorw("插入图片元数据失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 插入图片元数据失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 保存文件索引
+	fileIndex := completeMetadata.ToFileIndex(cfg.ImagePath)
+	if err := db.InsertFileIndex(fileIndex); err != nil {
+		Logger.Errorw("插入文件索引失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 插入文件索引失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("\n图片分析完成并已存入数据库")
+	fmt.Printf("MD5: %s\n", basicInfo.MD5)
+	fmt.Printf("数据库路径: %s\n", dbPath)
+
+	Logger.Infow("程序结束", "md5", basicInfo.MD5)
 }
