@@ -14,8 +14,6 @@ github.com/klauspost/compress v1.17.9 h1:6KIumPrER1LHsvBVuDa0r5xaG0Es51mhhB9BQB2
 github.com/klauspost/compress v1.17.9/go.mod h1:Di0epgTjJY877eYKx5yC51cX2A2Vl2ibi7bDH9ttBbw=
 github.com/klauspost/cpuid/v2 v2.2.8 h1:+StwCXwm9PdpiEkPyzBXIy+M9KUb4ODm0Zarf1kS5BM=
 github.com/klauspost/cpuid/v2 v2.2.8/go.mod h1:Lcz8mBdAVJIBVzewtcLocK12l3Y+JytZYpaMropDUws=
-github.com/lancedb/lancedb-go v0.1.1 h1:gHFpAL6egCcYjYSUj1RlqNP+9c1kRMfK5GwLlTThi9k=
-github.com/lancedb/lancedb-go v0.1.1/go.mod h1:HzleylKfuw2HgfBBfrE3tb4LMKNdJ3/TQ1Ziyd+CLZk=
 github.com/lancedb/lancedb-go v0.1.2 h1:ucM+KNN5J886OilSh4MRdyBa1sinHyrisoaswNISNFk=
 github.com/lancedb/lancedb-go v0.1.2/go.mod h1:HzleylKfuw2HgfBBfrE3tb4LMKNdJ3/TQ1Ziyd+CLZk=
 github.com/pierrec/lz4/v4 v4.1.21 h1:yOVMLb6qSIDP67pl/5F7RepeKYu/VmTyEXvuMI5d9mQ=

@@ -7,6 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jdeng/goheif v0.0.0-20260309214039-46ce8d592019
 	github.com/lancedb/lancedb-go v0.1.2
+	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
 	go.uber.org/zap v1.27.1
 	golang.org/x/image v0.37.0
 )
