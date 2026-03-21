@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 	"unsafe"
 
@@ -48,6 +47,8 @@ type ImageMetadata struct {
 	Mood        []string
 	Action      []string
 	ImageVector []float32 // 1024-dim vector
+	CreateTime  time.Time
+	UpdateTime  time.Time
 }
 
 // FaceVector 人脸向量结构
@@ -56,12 +57,16 @@ type FaceVector struct {
 	MD5        string
 	FaceVector []float32 // 1024-dim vector
 	Box        []float32 // [x1, y1, x2, y2]
+	CreateTime time.Time
+	UpdateTime time.Time
 }
 
 // FileIndex 文件索引结构
 type FileIndex struct {
-	MD5      string
-	FilePath string
+	MD5        string
+	FilePath   string
+	CreateTime time.Time
+	UpdateTime time.Time
 }
 
 // NewLanceDBManager 创建 LanceDB 管理器
@@ -155,14 +160,22 @@ func (m *LanceDBManager) createImageMetadataTable() error {
 		AddStringField("mood", true).
 		AddStringField("action", true).
 		AddVectorField("image_vector", VectorDimension, contracts.VectorDataTypeFloat32, true).
+		AddTimestampField("create_time", arrow.Microsecond, true).
+		AddTimestampField("update_time", arrow.Microsecond, true).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to build schema: %w", err)
 	}
 
-	_, err = m.db.CreateTable(m.ctx, TableImageMetadata, schema)
+	tbl, err := m.db.CreateTable(m.ctx, TableImageMetadata, schema)
 	if err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
+	}
+	defer tbl.Close()
+
+	// 为 md5 字段创建 BTree 索引
+	if err := tbl.CreateIndex(m.ctx, []string{"md5"}, contracts.IndexTypeBTree); err != nil {
+		return fmt.Errorf("failed to create index on md5: %w", err)
 	}
 
 	return nil
@@ -175,14 +188,22 @@ func (m *LanceDBManager) createFaceVectorsTable() error {
 		AddStringField("md5", false).
 		AddVectorField("face_vector", VectorDimension, contracts.VectorDataTypeFloat32, true).
 		AddStringField("box", true).
+		AddTimestampField("create_time", arrow.Microsecond, true).
+		AddTimestampField("update_time", arrow.Microsecond, true).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to build schema: %w", err)
 	}
 
-	_, err = m.db.CreateTable(m.ctx, TableFaceVectors, schema)
+	tbl, err := m.db.CreateTable(m.ctx, TableFaceVectors, schema)
 	if err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
+	}
+	defer tbl.Close()
+
+	// 为 md5 字段创建 BTree 索引
+	if err := tbl.CreateIndex(m.ctx, []string{"md5"}, contracts.IndexTypeBTree); err != nil {
+		return fmt.Errorf("failed to create index on md5: %w", err)
 	}
 
 	return nil
@@ -193,14 +214,22 @@ func (m *LanceDBManager) createFileIndexTable() error {
 	schema, err := lancedb.NewSchemaBuilder().
 		AddStringField("md5", false).
 		AddStringField("file_path", false).
+		AddTimestampField("create_time", arrow.Microsecond, true).
+		AddTimestampField("update_time", arrow.Microsecond, true).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to build schema: %w", err)
 	}
 
-	_, err = m.db.CreateTable(m.ctx, TableFileIndex, schema)
+	tbl, err := m.db.CreateTable(m.ctx, TableFileIndex, schema)
 	if err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
+	}
+	defer tbl.Close()
+
+	// 为 md5 字段创建 BTree 索引
+	if err := tbl.CreateIndex(m.ctx, []string{"md5"}, contracts.IndexTypeBTree); err != nil {
+		return fmt.Errorf("failed to create index on md5: %w", err)
 	}
 
 	return nil
@@ -352,7 +381,14 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 	defer vectorBuilder.Release()
 	vectorValueBuilder := vectorBuilder.ValueBuilder().(*array.Float32Builder)
 
+	createTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	defer createTimeBuilder.Release()
+
+	updateTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	defer updateTimeBuilder.Release()
+
 	// 填充数据
+	now := time.Now()
 	for _, item := range data {
 		md5Builder.Append(item.MD5)
 		themeBuilder.Append(marshalStringSlice(item.Theme))
@@ -374,6 +410,16 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 		for _, v := range item.ImageVector {
 			vectorValueBuilder.Append(v)
 		}
+
+		// 设置创建时间和更新时间
+		if item.CreateTime.IsZero() {
+			item.CreateTime = now
+		}
+		if item.UpdateTime.IsZero() {
+			item.UpdateTime = now
+		}
+		createTimeBuilder.Append(arrow.Timestamp(item.CreateTime.UnixMicro()))
+		updateTimeBuilder.Append(arrow.Timestamp(item.UpdateTime.UnixMicro()))
 	}
 
 	// 创建数组
@@ -393,6 +439,8 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 		{Name: "mood", Type: arrow.BinaryTypes.String, Nullable: true},
 		{Name: "action", Type: arrow.BinaryTypes.String, Nullable: true},
 		{Name: "image_vector", Type: arrow.FixedSizeListOf(VectorDimension, arrow.PrimitiveTypes.Float32), Nullable: true},
+		{Name: "create_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "update_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
 	}, nil)
 
 	columns := []arrow.Array{
@@ -411,6 +459,8 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 		moodBuilder.NewArray(),
 		actionBuilder.NewArray(),
 		vectorBuilder.NewArray(),
+		createTimeBuilder.NewArray(),
+		updateTimeBuilder.NewArray(),
 	}
 
 	return array.NewRecord(schema, columns, int64(len(data))), nil
@@ -434,6 +484,13 @@ func (m *LanceDBManager) buildFaceVectorRecord(data []FaceVector) (arrow.Record,
 	boxBuilder := array.NewStringBuilder(pool)
 	defer boxBuilder.Release()
 
+	createTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	defer createTimeBuilder.Release()
+
+	updateTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	defer updateTimeBuilder.Release()
+
+	now := time.Now()
 	for _, item := range data {
 		faceIDBuilder.Append(item.FaceID)
 		md5Builder.Append(item.MD5)
@@ -445,6 +502,16 @@ func (m *LanceDBManager) buildFaceVectorRecord(data []FaceVector) (arrow.Record,
 		}
 
 		boxBuilder.Append(marshalFloat32SliceToJSON(item.Box))
+
+		// 设置创建时间和更新时间
+		if item.CreateTime.IsZero() {
+			item.CreateTime = now
+		}
+		if item.UpdateTime.IsZero() {
+			item.UpdateTime = now
+		}
+		createTimeBuilder.Append(arrow.Timestamp(item.CreateTime.UnixMicro()))
+		updateTimeBuilder.Append(arrow.Timestamp(item.UpdateTime.UnixMicro()))
 	}
 
 	schema := arrow.NewSchema([]arrow.Field{
@@ -452,6 +519,8 @@ func (m *LanceDBManager) buildFaceVectorRecord(data []FaceVector) (arrow.Record,
 		{Name: "md5", Type: arrow.BinaryTypes.String, Nullable: false},
 		{Name: "face_vector", Type: arrow.FixedSizeListOf(VectorDimension, arrow.PrimitiveTypes.Float32), Nullable: true},
 		{Name: "box", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "create_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "update_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
 	}, nil)
 
 	columns := []arrow.Array{
@@ -459,6 +528,8 @@ func (m *LanceDBManager) buildFaceVectorRecord(data []FaceVector) (arrow.Record,
 		md5Builder.NewArray(),
 		vectorBuilder.NewArray(),
 		boxBuilder.NewArray(),
+		createTimeBuilder.NewArray(),
+		updateTimeBuilder.NewArray(),
 	}
 
 	return array.NewRecord(schema, columns, int64(len(data))), nil
@@ -474,19 +545,40 @@ func (m *LanceDBManager) buildFileIndexRecord(data []FileIndex) (arrow.Record, e
 	pathBuilder := array.NewStringBuilder(pool)
 	defer pathBuilder.Release()
 
+	createTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	defer createTimeBuilder.Release()
+
+	updateTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	defer updateTimeBuilder.Release()
+
+	now := time.Now()
 	for _, item := range data {
 		md5Builder.Append(item.MD5)
 		pathBuilder.Append(item.FilePath)
+
+		// 设置创建时间和更新时间
+		if item.CreateTime.IsZero() {
+			item.CreateTime = now
+		}
+		if item.UpdateTime.IsZero() {
+			item.UpdateTime = now
+		}
+		createTimeBuilder.Append(arrow.Timestamp(item.CreateTime.UnixMicro()))
+		updateTimeBuilder.Append(arrow.Timestamp(item.UpdateTime.UnixMicro()))
 	}
 
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "md5", Type: arrow.BinaryTypes.String, Nullable: false},
 		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "create_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "update_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
 	}, nil)
 
 	columns := []arrow.Array{
 		md5Builder.NewArray(),
 		pathBuilder.NewArray(),
+		createTimeBuilder.NewArray(),
+		updateTimeBuilder.NewArray(),
 	}
 
 	return array.NewRecord(schema, columns, int64(len(data))), nil
@@ -704,9 +796,5 @@ func (m *LanceDBManager) parseFaceVector(data map[string]interface{}) (*FaceVect
 
 // GetDefaultDBPath 获取默认数据库路径
 func GetDefaultDBPath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "./photoVL_db"
-	}
-	return filepath.Join(homeDir, ".photoVL", "lancedb")
+	return "./photoVL_db"
 }
