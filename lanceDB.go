@@ -144,6 +144,8 @@ func (m *LanceDBManager) initTables() error {
 // createImageMetadataTable 创建图片元数据表
 func (m *LanceDBManager) createImageMetadataTable() error {
 	// 使用 SchemaBuilder 创建 schema
+	// 注意：create_time 和 update_time 使用 Int64 存储 Unix 微秒时间戳
+	// 因为 LanceDB Go SDK 不能正确转换 Timestamp 类型
 	schema, err := lancedb.NewSchemaBuilder().
 		AddStringField("md5", false).
 		AddStringField("theme", true).
@@ -160,8 +162,8 @@ func (m *LanceDBManager) createImageMetadataTable() error {
 		AddStringField("mood", true).
 		AddStringField("action", true).
 		AddVectorField("image_vector", VectorDimension, contracts.VectorDataTypeFloat32, true).
-		AddTimestampField("create_time", arrow.Microsecond, true).
-		AddTimestampField("update_time", arrow.Microsecond, true).
+		AddInt64Field("create_time", true).
+		AddInt64Field("update_time", true).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to build schema: %w", err)
@@ -237,9 +239,10 @@ func (m *LanceDBManager) createFileIndexTable() error {
 
 // InsertImageMetadata 插入或更新图片元数据
 // 如果 MD5 已存在，则合并数据：新数据有值的字段更新，新数据无值的字段保留旧值
+// 如果没有字段需要更新，则跳过数据库操作
 func (m *LanceDBManager) InsertImageMetadata(data *ImageMetadata) error {
-	// 验证向量维度
-	if len(data.ImageVector) != VectorDimension {
+	// 验证向量维度（如果提供了向量）
+	if len(data.ImageVector) > 0 && len(data.ImageVector) != VectorDimension {
 		return fmt.Errorf("image_vector dimension must be %d, got %d", VectorDimension, len(data.ImageVector))
 	}
 
@@ -251,8 +254,13 @@ func (m *LanceDBManager) InsertImageMetadata(data *ImageMetadata) error {
 
 	if existing != nil {
 		// 已存在，合并数据
-		m.mergeImageMetadata(existing, data)
+		updated := m.mergeImageMetadata(existing, data)
+		if !updated {
+			// 没有字段需要更新，跳过
+			return nil
+		}
 		data = existing
+		
 		// 删除旧记录，然后插入新记录（LanceDB 的 merge_insert 替代方案）
 		if err := m.deleteImageMetadataByMD5(data.MD5); err != nil {
 			return fmt.Errorf("failed to delete old metadata: %w", err)
@@ -281,61 +289,82 @@ func (m *LanceDBManager) InsertImageMetadata(data *ImageMetadata) error {
 
 // mergeImageMetadata 合并图片元数据
 // 规则：新数据有值的字段覆盖旧数据，新数据无值的字段保留旧数据
-func (m *LanceDBManager) mergeImageMetadata(old, new *ImageMetadata) {
+// 返回值：是否有任何字段被更新
+func (m *LanceDBManager) mergeImageMetadata(old, new *ImageMetadata) bool {
+	updated := false
+
 	// 字符串字段：非空则更新
 	if new.Description != "" {
 		old.Description = new.Description
+		updated = true
 	}
 	if new.Ext != "" {
 		old.Ext = new.Ext
+		updated = true
 	}
 	if new.Place != "" {
 		old.Place = new.Place
+		updated = true
 	}
 	if new.Colors != "" {
 		old.Colors = new.Colors
+		updated = true
 	}
 
 	// 切片字段：非空则更新
 	if len(new.Theme) > 0 {
 		old.Theme = new.Theme
+		updated = true
 	}
 	if len(new.Objects) > 0 {
 		old.Objects = new.Objects
+		updated = true
 	}
 	if len(new.Address) > 0 {
 		old.Address = new.Address
+		updated = true
 	}
 	if len(new.Mood) > 0 {
 		old.Mood = new.Mood
+		updated = true
 	}
 	if len(new.Action) > 0 {
 		old.Action = new.Action
+		updated = true
 	}
 	if len(new.Coordinates) > 0 {
 		old.Coordinates = new.Coordinates
+		updated = true
 	}
 	if len(new.Dimensions) > 0 {
 		old.Dimensions = new.Dimensions
+		updated = true
 	}
 
 	// 数值字段：非零则更新
 	if new.Size != 0 {
 		old.Size = new.Size
+		updated = true
 	}
 
 	// 时间字段：有效时间则更新
 	if !new.Datetime.IsZero() {
 		old.Datetime = new.Datetime
+		updated = true
 	}
 
 	// 向量字段：非空则更新（空向量表示尚未生成）
 	if len(new.ImageVector) > 0 {
 		old.ImageVector = new.ImageVector
+		updated = true
 	}
 
-	// 更新时间
-	old.UpdateTime = time.Now()
+	// 只有在有字段被更新时才更新时间
+	if updated {
+		old.UpdateTime = time.Now()
+	}
+
+	return updated
 }
 
 // deleteImageMetadataByMD5 根据 MD5 删除图片元数据
@@ -497,10 +526,11 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 	defer vectorBuilder.Release()
 	vectorValueBuilder := vectorBuilder.ValueBuilder().(*array.Float32Builder)
 
-	createTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	// create_time 和 update_time 使用 Int64Builder 存储 Unix 微秒时间戳
+	createTimeBuilder := array.NewInt64Builder(pool)
 	defer createTimeBuilder.Release()
 
-	updateTimeBuilder := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	updateTimeBuilder := array.NewInt64Builder(pool)
 	defer updateTimeBuilder.Release()
 
 	// 填充数据
@@ -511,7 +541,12 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 		descBuilder.Append(item.Description)
 		objectsBuilder.Append(marshalStringSlice(item.Objects))
 		coordsBuilder.Append(marshalFloat32SliceToJSON(item.Coordinates))
-		datetimeBuilder.Append(arrow.Timestamp(item.Datetime.UnixMicro()))
+		// 拍摄时间也使用 UTC 存储
+		if !item.Datetime.IsZero() {
+			datetimeBuilder.Append(arrow.Timestamp(item.Datetime.UTC().UnixMicro()))
+		} else {
+			datetimeBuilder.AppendNull()
+		}
 		addressBuilder.Append(marshalStringSlice(item.Address))
 		dimensionsBuilder.Append(marshalFloat32SliceToJSON(item.Dimensions))
 		extBuilder.Append(item.Ext)
@@ -531,18 +566,20 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 			vectorBuilder.AppendNull()
 		}
 
-		// 设置创建时间和更新时间
+		// 设置创建时间和更新时间（使用 UTC 时间存储，避免时区问题）
 		if item.CreateTime.IsZero() {
 			item.CreateTime = now
 		}
 		if item.UpdateTime.IsZero() {
 			item.UpdateTime = now
 		}
-		createTimeBuilder.Append(arrow.Timestamp(item.CreateTime.UnixMicro()))
-		updateTimeBuilder.Append(arrow.Timestamp(item.UpdateTime.UnixMicro()))
+		// 存储为 Unix 微秒时间戳（Int64）
+		createTimeBuilder.Append(item.CreateTime.UTC().UnixMicro())
+		updateTimeBuilder.Append(item.UpdateTime.UTC().UnixMicro())
 	}
 
 	// 创建数组
+	// 注意：create_time 和 update_time 使用 Int64 存储 Unix 微秒时间戳
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "md5", Type: arrow.BinaryTypes.String, Nullable: false},
 		{Name: "theme", Type: arrow.BinaryTypes.String, Nullable: true},
@@ -559,8 +596,8 @@ func (m *LanceDBManager) buildImageMetadataRecord(data []*ImageMetadata) (arrow.
 		{Name: "mood", Type: arrow.BinaryTypes.String, Nullable: true},
 		{Name: "action", Type: arrow.BinaryTypes.String, Nullable: true},
 		{Name: "image_vector", Type: arrow.FixedSizeListOf(VectorDimension, arrow.PrimitiveTypes.Float32), Nullable: true},
-		{Name: "create_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
-		{Name: "update_time", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "create_time", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "update_time", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
 	}, nil)
 
 	columns := []arrow.Array{
@@ -913,16 +950,10 @@ func (m *LanceDBManager) parseImageMetadata(data map[string]interface{}) (*Image
 		result.Size = v
 	}
 
-	// 解析时间戳
-	if v, ok := data["datetime"].(arrow.Timestamp); ok {
-		result.Datetime = time.UnixMicro(int64(v))
-	}
-	if v, ok := data["create_time"].(arrow.Timestamp); ok {
-		result.CreateTime = time.UnixMicro(int64(v))
-	}
-	if v, ok := data["update_time"].(arrow.Timestamp); ok {
-		result.UpdateTime = time.UnixMicro(int64(v))
-	}
+	// 解析时间戳（支持 arrow.Timestamp 和 time.Time 两种类型）
+	result.Datetime = parseTimestampFromArrow(data["datetime"])
+	result.CreateTime = parseTimestampFromArrow(data["create_time"])
+	result.UpdateTime = parseTimestampFromArrow(data["update_time"])
 
 	// 解析向量
 	if v, ok := data["image_vector"].(arrow.Array); ok {
@@ -953,6 +984,46 @@ func unmarshalFloat32Slice(s string) []float32 {
 	var result []float32
 	json.Unmarshal([]byte(s), &result)
 	return result
+}
+
+// parseTimestampFromArrow 从 Arrow 数组或值解析时间戳
+// 支持 Int64 存储的 Unix 微秒时间戳
+func parseTimestampFromArrow(v interface{}) time.Time {
+	if v == nil {
+		return time.Time{}
+	}
+	
+	// 尝试直接解析为时间戳值
+	switch t := v.(type) {
+	case int64:
+		return time.UnixMicro(t).Local()
+	case float64:
+		return time.UnixMicro(int64(t)).Local()
+	case arrow.Timestamp:
+		return time.UnixMicro(int64(t)).Local()
+	case time.Time:
+		return t.Local()
+	}
+	
+	// 尝试解析为 Arrow 数组（LanceDB 返回的是数组）
+	if arr, ok := v.(arrow.Array); ok {
+		if arr.Len() == 0 || arr.IsNull(0) {
+			return time.Time{}
+		}
+		
+		switch a := arr.(type) {
+		case *array.Int64:
+			return time.UnixMicro(a.Value(0)).Local()
+		case *array.Timestamp:
+			return time.UnixMicro(int64(a.Value(0))).Local()
+		default:
+			Logger.Warnw("parseTimestampFromArrow: unknown array type", "type", fmt.Sprintf("%T", v))
+			return time.Time{}
+		}
+	}
+	
+	Logger.Warnw("parseTimestampFromArrow: unknown type", "type", fmt.Sprintf("%T", v), "value", v)
+	return time.Time{}
 }
 
 // parseFaceVector 解析人脸向量

@@ -705,7 +705,8 @@ func extractMetadata(appCtx *AppContext) *ImageBasicInfo {
 }
 
 // checkDuplicateFile 检查并处理重复文件
-// 返回值: true - 已处理（重复文件），false - 需要继续处理新文件
+// 返回值: true - 已处理（需要更新元数据），false - 新文件
+// 注意：即使 MD5 已存在，也需要用新的分析结果更新元数据
 func checkDuplicateFile(appCtx *AppContext, basicInfo *ImageBasicInfo) bool {
 	exists, err := appCtx.DB.CheckMD5Exists(basicInfo.MD5)
 	if err != nil {
@@ -715,10 +716,10 @@ func checkDuplicateFile(appCtx *AppContext, basicInfo *ImageBasicInfo) bool {
 	}
 
 	if !exists {
-		return false // 不是重复文件，继续处理
+		return false // 不是重复文件，继续处理新文件
 	}
 
-	// 查询该 MD5 已有的文件路径
+	// MD5 已存在，查询已有的文件路径
 	existingPaths, err := appCtx.DB.GetFilePathsByMD5(basicInfo.MD5)
 	if err != nil {
 		Logger.Errorw("查询文件路径失败", "error", err)
@@ -735,30 +736,26 @@ func checkDuplicateFile(appCtx *AppContext, basicInfo *ImageBasicInfo) bool {
 		}
 	}
 
-	if pathExists {
-		// 路径已存在，说明是完全相同的重复处理，静默退出
-		fmt.Println("\n图片已存在（相同路径），跳过处理")
-		Logger.Infow("程序结束")
-		return true
+	if !pathExists {
+		// 路径不存在，添加新的文件索引
+		Logger.Infow("检测到重复文件（不同路径），添加文件索引",
+			"md5", basicInfo.MD5,
+			"newPath", appCtx.Config.ImagePath,
+			"existingPaths", existingPaths)
+
+		fileIndex := &FileIndex{
+			MD5:      basicInfo.MD5,
+			FilePath: appCtx.Config.ImagePath,
+		}
+		if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
+			Logger.Errorw("插入文件索引失败", "error", err)
+			fmt.Fprintf(os.Stderr, "错误: 插入文件索引失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("\n检测到不同路径的重复文件，已添加文件索引")
 	}
 
-	// 路径不存在，说明是不同路径的重复文件
-	Logger.Infow("检测到重复文件（不同路径），添加文件索引",
-		"md5", basicInfo.MD5,
-		"newPath", appCtx.Config.ImagePath,
-		"existingPaths", existingPaths)
-
-	fileIndex := &FileIndex{
-		MD5:      basicInfo.MD5,
-		FilePath: appCtx.Config.ImagePath,
-	}
-	if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
-		Logger.Errorw("插入文件索引失败", "error", err)
-		fmt.Fprintf(os.Stderr, "错误: 插入文件索引失败: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("\n图片已存在（不同路径的重复文件），已添加文件索引")
-	Logger.Infow("程序结束")
+	// 返回 true 表示需要继续执行元数据更新
 	return true
 }
 
@@ -801,6 +798,44 @@ func saveNewImage(appCtx *AppContext, basicInfo *ImageBasicInfo, result *ImageAn
 	Logger.Infow("程序结束", "md5", basicInfo.MD5)
 }
 
+// updateExistingImage 更新已有图片的元数据
+func updateExistingImage(appCtx *AppContext, basicInfo *ImageBasicInfo, result *ImageAnalysisResult) {
+	// 使用已解析的视觉分析结果
+	Logger.Infow("使用已解析的视觉分析结果更新现有数据")
+	if result.ParsedData == nil {
+		Logger.Errorw("解析结果为空")
+		fmt.Fprintf(os.Stderr, "错误: 解析结果为空\n")
+		os.Exit(1)
+	}
+
+	// 合并元数据
+	completeMetadata := appCtx.Extractor.MergeMetadata(basicInfo, result.ParsedData)
+
+	// 图片向量保持为空，等待后续向量生成服务集成
+
+	// 更新数据库（InsertImageMetadata 会自动处理合并逻辑）
+	Logger.Infow("更新数据库")
+	imageMeta := completeMetadata.ToImageMetadata()
+	if err := appCtx.DB.InsertImageMetadata(imageMeta); err != nil {
+		Logger.Errorw("更新图片元数据失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 更新图片元数据失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 确保文件索引存在（如果不存在则添加）
+	fileIndex := completeMetadata.ToFileIndex(appCtx.Config.ImagePath)
+	if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
+		Logger.Errorw("插入文件索引失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 插入文件索引失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("\n图片分析完成并已更新数据库")
+	fmt.Printf("MD5: %s\n", basicInfo.MD5)
+	fmt.Printf("数据库路径: %s\n", appCtx.Config.DBPath)
+	Logger.Infow("程序结束", "md5", basicInfo.MD5)
+}
+
 func main() {
 	// 初始化并验证环境
 	appCtx := setupAndValidate()
@@ -818,10 +853,13 @@ func main() {
 	basicInfo := extractMetadata(appCtx)
 
 	// 检查并处理重复文件
-	if checkDuplicateFile(appCtx, basicInfo) {
-		return // 重复文件已处理，直接返回
-	}
+	isExistingFile := checkDuplicateFile(appCtx, basicInfo)
 
-	// 保存新图片元数据
-	saveNewImage(appCtx, basicInfo, result)
+	if isExistingFile {
+		// 更新已有图片的元数据
+		updateExistingImage(appCtx, basicInfo, result)
+	} else {
+		// 保存新图片元数据
+		saveNewImage(appCtx, basicInfo, result)
+	}
 }
