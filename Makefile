@@ -1,4 +1,4 @@
-.PHONY: build clean install-deps run-vl run-eb test
+.PHONY: build clean install-deps run-vl run-eb run-dir-vl run-dir-eb test
 
 # 默认目标
 build:
@@ -20,6 +20,14 @@ run-vl:
 # 运行向量嵌入模式
 run-eb:
 	./photoVL -fpath $(IMG) -opt eb
+
+# 运行文件夹视觉分析模式
+run-dir-vl:
+	./photoVL -dir $(DIR) -opt vl
+
+# 运行文件夹向量嵌入模式
+run-dir-eb:
+	./photoVL -dir $(DIR) -opt eb
 
 # 测试编译
 test:
@@ -44,6 +52,12 @@ prod:
 
 # 运行向量嵌入
 #make run-eb IMG=photo.jpg
+
+# 运行文件夹视觉分析
+#make run-dir-vl DIR=/path/to/images
+
+# 运行文件夹向量嵌入
+#make run-dir-eb DIR=/path/to/images
 
 # 安装依赖
 #make install-deps

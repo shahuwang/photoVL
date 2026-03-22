@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -553,6 +554,7 @@ func showImageInfo(path string) {
 // Config 命令行配置
 type Config struct {
 	ImagePath   string
+	DirPath     string // 扫描文件夹路径
 	DBPath      string
 	Prompt      string
 	PromptFile  string
@@ -567,6 +569,7 @@ func parseFlags() *Config {
 	cfg := &Config{}
 
 	flag.StringVar(&cfg.ImagePath, "fpath", "", "要处理的图片路径")
+	flag.StringVar(&cfg.DirPath, "dir", "", "要扫描的文件夹路径")
 	flag.StringVar(&cfg.DBPath, "db", "photoVL_lancedb", "LanceDB 数据库路径")
 	flag.StringVar(&cfg.Prompt, "prompt", "", "分析提示词（直接提供）")
 	flag.StringVar(&cfg.PromptFile, "p", "", "提示词文件路径")
@@ -595,31 +598,55 @@ func setupAndValidate() *AppContext {
 	// 解析命令行参数
 	cfg := parseFlags()
 
-	// 检查必需参数
-	if cfg.ImagePath == "" {
-		fmt.Fprintf(os.Stderr, "错误: 缺少必需参数 -fpath\n\n")
+	// 检查必需参数：-fpath 或 -dir 必须提供一个
+	if cfg.ImagePath == "" && cfg.DirPath == "" {
+		fmt.Fprintf(os.Stderr, "错误: 缺少必需参数，请提供 -fpath（图片路径）或 -dir（文件夹路径）\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	// 验证图片文件是否存在
-	if _, err := os.Stat(cfg.ImagePath); os.IsNotExist(err) {
-		Logger.Errorw("图片文件不存在", "path", cfg.ImagePath)
-		fmt.Fprintf(os.Stderr, "错误: 图片文件不存在: %s\n", cfg.ImagePath)
-		os.Exit(1)
+	// 如果同时提供了 -fpath 和 -dir，优先使用 -dir
+	if cfg.ImagePath != "" && cfg.DirPath != "" {
+		Logger.Warnw("同时提供了 -fpath 和 -dir，优先使用 -dir 进行文件夹扫描")
+		cfg.ImagePath = ""
 	}
 
-	// 处理 --info 参数（仅显示图片信息）
-	if cfg.ShowInfo {
-		showImageInfo(cfg.ImagePath)
-		os.Exit(0)
+	// 验证单文件模式
+	if cfg.ImagePath != "" {
+		// 验证图片文件是否存在
+		if _, err := os.Stat(cfg.ImagePath); os.IsNotExist(err) {
+			Logger.Errorw("图片文件不存在", "path", cfg.ImagePath)
+			fmt.Fprintf(os.Stderr, "错误: 图片文件不存在: %s\n", cfg.ImagePath)
+			os.Exit(1)
+		}
+
+		// 处理 --info 参数（仅显示图片信息）
+		if cfg.ShowInfo {
+			showImageInfo(cfg.ImagePath)
+			os.Exit(0)
+		}
+	}
+
+	// 验证文件夹模式
+	if cfg.DirPath != "" {
+		info, err := os.Stat(cfg.DirPath)
+		if err != nil {
+			Logger.Errorw("文件夹不存在或无法访问", "path", cfg.DirPath, "error", err)
+			fmt.Fprintf(os.Stderr, "错误: 文件夹不存在或无法访问: %s\n", cfg.DirPath)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			Logger.Errorw("指定的路径不是文件夹", "path", cfg.DirPath)
+			fmt.Fprintf(os.Stderr, "错误: 指定的路径不是文件夹: %s\n", cfg.DirPath)
+			os.Exit(1)
+		}
 	}
 
 	// 创建 Ollama 客户端
 	client := NewOllamaClient(cfg.OllamaURL, cfg.OllamaModel)
 
 	// 仅在视觉分析模式下检查 Ollama 服务健康状态
-	if cfg.Opt != "eb" {
+	if cfg.Opt != "eb" && cfg.ImagePath != "" {
 		if err := client.CheckHealth(); err != nil {
 			Logger.Errorw("Ollama 服务连接失败", "error", err)
 			fmt.Fprintf(os.Stderr, "错误: 无法连接到 Ollama 服务 (%s)\n", cfg.OllamaURL)
@@ -630,6 +657,7 @@ func setupAndValidate() *AppContext {
 
 	Logger.Infow("解析命令行参数",
 		"imagePath", cfg.ImagePath,
+		"dirPath", cfg.DirPath,
 		"dbPath", cfg.DBPath,
 		"promptFile", cfg.PromptFile,
 		"opt", cfg.Opt,
@@ -846,6 +874,18 @@ func main() {
 	appCtx := setupAndValidate()
 	defer Logger.Sync()
 
+	// 判断是单文件模式还是文件夹模式
+	if appCtx.Config.DirPath != "" {
+		// 文件夹扫描模式
+		processDirectoryMode(appCtx)
+	} else {
+		// 单文件模式
+		processSingleFileMode(appCtx)
+	}
+}
+
+// processSingleFileMode 单文件处理模式
+func processSingleFileMode(appCtx *AppContext) {
 	// 根据操作模式执行不同的处理逻辑
 	switch appCtx.Config.Opt {
 	case "eb":
@@ -859,6 +899,336 @@ func main() {
 		fmt.Fprintf(os.Stderr, "支持的模式: vl(视觉分析), eb(向量嵌入)\n")
 		os.Exit(1)
 	}
+}
+
+// processDirectoryMode 文件夹扫描处理模式
+func processDirectoryMode(appCtx *AppContext) {
+	Logger.Infow("进入文件夹扫描模式", "dir", appCtx.Config.DirPath, "opt", appCtx.Config.Opt)
+
+	// 扫描文件夹获取图片列表
+	imageFiles, err := scanDirectoryForImages(appCtx.Config.DirPath)
+	if err != nil {
+		Logger.Errorw("扫描文件夹失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 扫描文件夹失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(imageFiles) == 0 {
+		fmt.Printf("文件夹中没有找到图片文件: %s\n", appCtx.Config.DirPath)
+		return
+	}
+
+	fmt.Printf("在文件夹中找到 %d 个图片文件\n", len(imageFiles))
+	Logger.Infow("开始处理文件夹中的图片", "count", len(imageFiles))
+
+	// 初始化数据库
+	appCtx.DB = initDatabase(appCtx.Config)
+	defer appCtx.DB.Close()
+
+	// 创建元数据提取器
+	appCtx.Extractor = NewMetadataExtractor()
+
+	// 根据操作模式处理
+	switch appCtx.Config.Opt {
+	case "eb":
+		processDirectoryEmbeddingMode(appCtx, imageFiles)
+	case "vl", "":
+		processDirectoryVisionMode(appCtx, imageFiles)
+	default:
+		fmt.Fprintf(os.Stderr, "错误: 不支持的操作模式: %s\n", appCtx.Config.Opt)
+		fmt.Fprintf(os.Stderr, "支持的模式: vl(视觉分析), eb(向量嵌入)\n")
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n文件夹处理完成，共处理 %d 个文件\n", len(imageFiles))
+}
+
+// scanDirectoryForImages 扫描文件夹中的图片文件
+func scanDirectoryForImages(dirPath string) ([]string, error) {
+	var imageFiles []string
+
+	// 支持的图片扩展名
+	supportedExts := map[string]bool{
+		".jpg": true, ".jpeg": true, ".png": true,
+		".gif": true, ".webp": true, ".bmp": true,
+		".heic": true, ".heif": true,
+	}
+
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			Logger.Warnw("访问文件失败", "path", path, "error", err)
+			return nil // 继续遍历
+		}
+
+		// 跳过目录
+		if info.IsDir() {
+			return nil
+		}
+
+		// 检查扩展名
+		ext := strings.ToLower(filepath.Ext(path))
+		if supportedExts[ext] {
+			imageFiles = append(imageFiles, path)
+		}
+
+		return nil
+	})
+
+	return imageFiles, err
+}
+
+// processDirectoryVisionMode 文件夹视觉分析模式
+func processDirectoryVisionMode(appCtx *AppContext, imageFiles []string) {
+	// 检查 Ollama 服务健康状态
+	if err := appCtx.Client.CheckHealth(); err != nil {
+		Logger.Errorw("Ollama 服务连接失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 无法连接到 Ollama 服务 (%s)\n", appCtx.Config.OllamaURL)
+		fmt.Fprintf(os.Stderr, "请确保 Ollama 服务已启动: ollama run %s\n", appCtx.Config.OllamaModel)
+		os.Exit(1)
+	}
+
+	prompt := getPrompt(appCtx.Config)
+	ctx := context.Background()
+
+	// 处理每个图片
+	for i, imagePath := range imageFiles {
+		fmt.Printf("\n[%d/%d] 处理: %s\n", i+1, len(imageFiles), imagePath)
+		Logger.Infow("处理图片", "index", i+1, "total", len(imageFiles), "path", imagePath)
+
+		// 提取基础元数据（获取 MD5）
+		basicInfo, err := appCtx.Extractor.ExtractAllMetadata(imagePath)
+		if err != nil {
+			Logger.Errorw("提取元数据失败", "path", imagePath, "error", err)
+			fmt.Printf("  提取元数据失败，跳过: %v\n", err)
+			continue
+		}
+
+		// 检查 MD5 是否已存在
+		exists, err := appCtx.DB.CheckMD5Exists(basicInfo.MD5)
+		if err != nil {
+			Logger.Errorw("检查 MD5 存在性失败", "path", imagePath, "error", err)
+			fmt.Printf("  检查 MD5 失败，跳过: %v\n", err)
+			continue
+		}
+
+		if exists {
+			// MD5 已存在，查询已有的文件路径
+			existingPaths, err := appCtx.DB.GetFilePathsByMD5(basicInfo.MD5)
+			if err != nil {
+				Logger.Errorw("查询文件路径失败", "path", imagePath, "error", err)
+				fmt.Printf("  查询文件路径失败，跳过: %v\n", err)
+				continue
+			}
+
+			// 检查当前路径是否已存在
+			pathExists := false
+			for _, path := range existingPaths {
+				if path == imagePath {
+					pathExists = true
+					break
+				}
+			}
+
+			if pathExists {
+				// 路径已存在，跳过处理
+				fmt.Printf("  图片已处理过（相同路径），跳过\n")
+				Logger.Infow("图片已处理过，跳过", "path", imagePath, "md5", basicInfo.MD5)
+				continue
+			}
+
+			// 路径不存在，添加新的文件索引
+			fmt.Printf("  检测到重复文件（不同路径），添加文件索引\n")
+			Logger.Infow("检测到重复文件（不同路径），添加文件索引",
+				"md5", basicInfo.MD5,
+				"newPath", imagePath,
+				"existingPaths", existingPaths)
+
+			fileIndex := &FileIndex{
+				MD5:      basicInfo.MD5,
+				FilePath: imagePath,
+			}
+			if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
+				Logger.Errorw("插入文件索引失败", "path", imagePath, "error", err)
+				fmt.Printf("  插入文件索引失败: %v\n", err)
+			}
+			continue
+		}
+
+		// MD5 不存在，执行视觉分析
+		fmt.Printf("  执行视觉分析...\n")
+		result, err := appCtx.Client.AnalyzeImage(ctx, imagePath, prompt)
+		if err != nil {
+			Logger.Errorw("分析图片失败", "path", imagePath, "error", err)
+			fmt.Printf("  分析失败，跳过: %v\n", err)
+			continue
+		}
+
+		// 保存结果到数据库
+		if result.ParsedData == nil {
+			Logger.Errorw("解析结果为空", "path", imagePath)
+			fmt.Printf("  解析结果为空，跳过\n")
+			continue
+		}
+
+		// 合并元数据
+		completeMetadata := appCtx.Extractor.MergeMetadata(basicInfo, result.ParsedData)
+
+		// 保存图片元数据
+		imageMeta := completeMetadata.ToImageMetadata()
+		if err := appCtx.DB.InsertImageMetadata(imageMeta); err != nil {
+			Logger.Errorw("插入图片元数据失败", "path", imagePath, "error", err)
+			fmt.Printf("  保存元数据失败: %v\n", err)
+			continue
+		}
+
+		// 保存文件索引
+		fileIndex := completeMetadata.ToFileIndex(imagePath)
+		if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
+			Logger.Errorw("插入文件索引失败", "path", imagePath, "error", err)
+			fmt.Printf("  保存文件索引失败: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("  处理完成，MD5: %s\n", basicInfo.MD5)
+		Logger.Infow("图片处理完成", "path", imagePath, "md5", basicInfo.MD5)
+	}
+}
+
+// processDirectoryEmbeddingMode 文件夹向量嵌入模式
+func processDirectoryEmbeddingMode(appCtx *AppContext, imageFiles []string) {
+	// 处理每个图片
+	for i, imagePath := range imageFiles {
+		fmt.Printf("\n[%d/%d] 处理: %s\n", i+1, len(imageFiles), imagePath)
+		Logger.Infow("处理图片", "index", i+1, "total", len(imageFiles), "path", imagePath)
+
+		// 提取基础元数据（获取 MD5）
+		basicInfo, err := appCtx.Extractor.ExtractAllMetadata(imagePath)
+		if err != nil {
+			Logger.Errorw("提取元数据失败", "path", imagePath, "error", err)
+			fmt.Printf("  提取元数据失败，跳过: %v\n", err)
+			continue
+		}
+
+		// 检查 MD5 是否已存在
+		exists, err := appCtx.DB.CheckMD5Exists(basicInfo.MD5)
+		if err != nil {
+			Logger.Errorw("检查 MD5 存在性失败", "path", imagePath, "error", err)
+			fmt.Printf("  检查 MD5 失败，跳过: %v\n", err)
+			continue
+		}
+
+		if exists {
+			// MD5 已存在，查询已有的文件路径
+			existingPaths, err := appCtx.DB.GetFilePathsByMD5(basicInfo.MD5)
+			if err != nil {
+				Logger.Errorw("查询文件路径失败", "path", imagePath, "error", err)
+				fmt.Printf("  查询文件路径失败，跳过: %v\n", err)
+				continue
+			}
+
+			// 检查当前路径是否已存在
+			pathExists := false
+			for _, path := range existingPaths {
+				if path == imagePath {
+					pathExists = true
+					break
+				}
+			}
+
+			if pathExists {
+				// 路径已存在，跳过处理
+				fmt.Printf("  图片已处理过（相同路径），跳过\n")
+				Logger.Infow("图片已处理过，跳过", "path", imagePath, "md5", basicInfo.MD5)
+				continue
+			}
+
+			// 路径不存在，添加新的文件索引
+			fmt.Printf("  检测到重复文件（不同路径），添加文件索引\n")
+			Logger.Infow("检测到重复文件（不同路径），添加文件索引",
+				"md5", basicInfo.MD5,
+				"newPath", imagePath,
+				"existingPaths", existingPaths)
+
+			fileIndex := &FileIndex{
+				MD5:      basicInfo.MD5,
+				FilePath: imagePath,
+			}
+			if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
+				Logger.Errorw("插入文件索引失败", "path", imagePath, "error", err)
+				fmt.Printf("  插入文件索引失败: %v\n", err)
+			}
+			continue
+		}
+
+		// MD5 不存在，执行向量嵌入处理
+		fmt.Printf("  执行向量嵌入处理...\n")
+		if err := processSingleImageEmbedding(appCtx, imagePath, basicInfo); err != nil {
+			Logger.Errorw("向量嵌入处理失败", "path", imagePath, "error", err)
+			fmt.Printf("  向量嵌入处理失败: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("  处理完成，MD5: %s\n", basicInfo.MD5)
+		Logger.Infow("图片处理完成", "path", imagePath, "md5", basicInfo.MD5)
+	}
+}
+
+// processSingleImageEmbedding 处理单个图片的向量嵌入
+func processSingleImageEmbedding(appCtx *AppContext, imagePath string, basicInfo *ImageBasicInfo) error {
+	// 创建 ImageEmbedding 实例
+	embedding, err := NewImageEmbedding(
+		imagePath,
+		DefaultModelURL,
+		DefaultModelName,
+		DefaultModelVersion,
+	)
+	if err != nil {
+		return fmt.Errorf("创建 ImageEmbedding 失败: %w", err)
+	}
+	defer embedding.Close()
+	embedding.SetLogger(Logger)
+
+	// 1. 生成图片整体向量
+	fmt.Printf("  生成图片整体向量...\n")
+	imageVector, err := embedding.GenerateImageVector(DefaultVectorDimension)
+	if err != nil {
+		return fmt.Errorf("生成图片整体向量失败: %w", err)
+	}
+	fmt.Printf("  图片整体向量生成完成，维度: %d\n", len(imageVector))
+
+	// 2. 保存图片整体向量到数据库
+	err = SaveImageVectorToMetadata(basicInfo.MD5, imageVector, appCtx.DB)
+	if err != nil {
+		return fmt.Errorf("保存图片整体向量失败: %w", err)
+	}
+
+	// 3. 检测人脸并生成向量
+	fmt.Printf("  检测人脸...\n")
+	faces, err := embedding.DetectFaces()
+	if err != nil {
+		return fmt.Errorf("检测人脸失败: %w", err)
+	}
+	fmt.Printf("  检测到 %d 个人脸\n", len(faces))
+
+	// 4. 保存人脸向量到数据库
+	if len(faces) > 0 {
+		count, err := SaveFaceVectorsToDB(basicInfo.MD5, faces, appCtx.DB)
+		if err != nil {
+			return fmt.Errorf("保存人脸向量失败: %w", err)
+		}
+		fmt.Printf("  成功保存 %d 个人脸向量\n", count)
+	}
+
+	// 5. 保存文件索引
+	fileIndex := &FileIndex{
+		MD5:      basicInfo.MD5,
+		FilePath: imagePath,
+	}
+	if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
+		return fmt.Errorf("插入文件索引失败: %w", err)
+	}
+
+	return nil
 }
 
 // processVisionMode 视觉分析模式：使用 Ollama 分析图片
