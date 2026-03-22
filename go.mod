@@ -3,6 +3,7 @@ module github.com/shahuwang/photoVL
 go 1.25.0
 
 require (
+	github.com/Kagami/go-face v0.0.0-20210630145111-0c14797b4d0e
 	github.com/apache/arrow/go/v17 v17.0.0
 	github.com/google/uuid v1.6.0
 	github.com/jdeng/goheif v0.0.0-20260309214039-46ce8d592019
@@ -27,3 +28,5 @@ require (
 	golang.org/x/tools v0.22.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 )
+
+replace github.com/Kagami/go-face => ./vendor/github.com/Kagami/go-face

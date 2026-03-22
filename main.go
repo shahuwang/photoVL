@@ -559,6 +559,7 @@ type Config struct {
 	ShowInfo    bool
 	OllamaURL   string
 	OllamaModel string
+	Opt         string // 操作模式: vl(视觉分析) 或 eb(向量嵌入)
 }
 
 // parseFlags 解析命令行参数
@@ -572,6 +573,7 @@ func parseFlags() *Config {
 	flag.BoolVar(&cfg.ShowInfo, "info", false, "仅显示图片信息，不进行分析")
 	flag.StringVar(&cfg.OllamaURL, "ollama-url", "http://localhost:11434", "Ollama 服务地址")
 	flag.StringVar(&cfg.OllamaModel, "model", "qwen3-vl:4b", "Ollama 模型名称")
+	flag.StringVar(&cfg.Opt, "opt", "vl", "操作模式: vl(视觉分析) 或 eb(向量嵌入)")
 
 	flag.Parse()
 	return cfg
@@ -616,18 +618,21 @@ func setupAndValidate() *AppContext {
 	// 创建 Ollama 客户端
 	client := NewOllamaClient(cfg.OllamaURL, cfg.OllamaModel)
 
-	// 检查服务健康状态
-	if err := client.CheckHealth(); err != nil {
-		Logger.Errorw("Ollama 服务连接失败", "error", err)
-		fmt.Fprintf(os.Stderr, "错误: 无法连接到 Ollama 服务 (%s)\n", cfg.OllamaURL)
-		fmt.Fprintf(os.Stderr, "请确保 Ollama 服务已启动: ollama run %s\n", cfg.OllamaModel)
-		os.Exit(1)
+	// 仅在视觉分析模式下检查 Ollama 服务健康状态
+	if cfg.Opt != "eb" {
+		if err := client.CheckHealth(); err != nil {
+			Logger.Errorw("Ollama 服务连接失败", "error", err)
+			fmt.Fprintf(os.Stderr, "错误: 无法连接到 Ollama 服务 (%s)\n", cfg.OllamaURL)
+			fmt.Fprintf(os.Stderr, "请确保 Ollama 服务已启动: ollama run %s\n", cfg.OllamaModel)
+			os.Exit(1)
+		}
 	}
 
 	Logger.Infow("解析命令行参数",
 		"imagePath", cfg.ImagePath,
 		"dbPath", cfg.DBPath,
 		"promptFile", cfg.PromptFile,
+		"opt", cfg.Opt,
 	)
 
 	return &AppContext{
@@ -841,6 +846,23 @@ func main() {
 	appCtx := setupAndValidate()
 	defer Logger.Sync()
 
+	// 根据操作模式执行不同的处理逻辑
+	switch appCtx.Config.Opt {
+	case "eb":
+		// 向量嵌入模式：获取图片整体向量和人脸向量
+		processEmbeddingMode(appCtx)
+	case "vl", "":
+		// 视觉分析模式（默认）：使用 Ollama 分析图片
+		processVisionMode(appCtx)
+	default:
+		fmt.Fprintf(os.Stderr, "错误: 不支持的操作模式: %s\n", appCtx.Config.Opt)
+		fmt.Fprintf(os.Stderr, "支持的模式: vl(视觉分析), eb(向量嵌入)\n")
+		os.Exit(1)
+	}
+}
+
+// processVisionMode 视觉分析模式：使用 Ollama 分析图片
+func processVisionMode(appCtx *AppContext) {
 	// 分析图片
 	ctx := context.Background()
 	result := analyzeImage(ctx, appCtx)
@@ -862,4 +884,87 @@ func main() {
 		// 保存新图片元数据
 		saveNewImage(appCtx, basicInfo, result)
 	}
+}
+
+// processEmbeddingMode 向量嵌入模式：获取图片整体向量和人脸向量
+func processEmbeddingMode(appCtx *AppContext) {
+	Logger.Infow("进入向量嵌入模式")
+
+	// 提取基础元数据（获取MD5）
+	appCtx.Extractor = NewMetadataExtractor()
+	basicInfo, err := appCtx.Extractor.ExtractAllMetadata(appCtx.Config.ImagePath)
+	if err != nil {
+		Logger.Errorw("提取基础元数据失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 提取基础元数据失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 初始化数据库
+	appCtx.DB = initDatabase(appCtx.Config)
+	defer appCtx.DB.Close()
+
+	// 创建 ImageEmbedding 实例
+	// 使用默认的向量服务配置
+	embedding, err := NewImageEmbedding(
+		appCtx.Config.ImagePath,
+		DefaultModelURL,
+		DefaultModelName,
+		DefaultModelVersion,
+	)
+	if err != nil {
+		Logger.Errorw("创建 ImageEmbedding 失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 创建 ImageEmbedding 失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer embedding.Close()
+	embedding.SetLogger(Logger)
+
+	fmt.Println("开始生成图片整体向量...")
+
+	// 1. 生成图片整体向量
+	imageVector, err := embedding.GenerateImageVector(DefaultVectorDimension)
+	if err != nil {
+		Logger.Errorw("生成图片整体向量失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 生成图片整体向量失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("图片整体向量生成完成，维度: %d\n", len(imageVector))
+
+	// 2. 保存图片整体向量到数据库
+	err = SaveImageVectorToMetadata(basicInfo.MD5, imageVector, appCtx.DB)
+	if err != nil {
+		Logger.Errorw("保存图片整体向量失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 保存图片整体向量失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("图片整体向量已保存到数据库")
+
+	// 3. 检测人脸并生成向量
+	fmt.Println("开始检测人脸...")
+	faces, err := embedding.DetectFaces()
+	if err != nil {
+		Logger.Errorw("检测人脸失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 检测人脸失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("检测到 %d 个人脸\n", len(faces))
+
+	// 4. 保存人脸向量到数据库
+	if len(faces) > 0 {
+		count, err := SaveFaceVectorsToDB(basicInfo.MD5, faces, appCtx.DB)
+		if err != nil {
+			Logger.Errorw("保存人脸向量失败", "error", err)
+			fmt.Fprintf(os.Stderr, "错误: 保存人脸向量失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("成功保存 %d 个人脸向量到数据库\n", count)
+	}
+
+	fmt.Println("\n向量嵌入处理完成")
+	fmt.Printf("MD5: %s\n", basicInfo.MD5)
+	fmt.Printf("数据库路径: %s\n", appCtx.Config.DBPath)
+	Logger.Infow("向量嵌入处理完成", "md5", basicInfo.MD5, "faces", len(faces))
 }

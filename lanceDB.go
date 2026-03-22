@@ -19,7 +19,7 @@ const (
 	TableImageMetadata = "image_metadata"
 	TableFaceVectors   = "face_vectors"
 	TableFileIndex     = "file_index"
-	VectorDimension    = 1024
+	VectorDimension    = 4096
 )
 
 // LanceDBManager LanceDB 管理器

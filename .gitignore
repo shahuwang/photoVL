@@ -4,3 +4,5 @@ lib/linux_amd64
 include
 photoVL_lancedb
 photoVL_test
+models
+vendor
