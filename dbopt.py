@@ -26,8 +26,11 @@ def print_all_rows(table_name):
     for i, row in enumerate(data):
         print(f"\n[Row {i+1}]")
         for k, v in row.items():
-            # 缩短向量显示，避免刷屏
-            display_v = f"{str(v)[:50]}..." if k == "vector" else v
+            # 跳过向量字段，避免刷屏
+            if k in ("vector", "image_vector", "face_vector"):
+                display_v = f"[{type(v).__name__}] (向量数据已省略)"
+            else:
+                display_v = v
             print(f"  {k}: {display_v}")
 
 def delete_all_rows(table_name):

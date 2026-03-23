@@ -561,7 +561,8 @@ type Config struct {
 	ShowInfo    bool
 	OllamaURL   string
 	OllamaModel string
-	Opt         string // 操作模式: vl(视觉分析) 或 eb(向量嵌入)
+	Opt         string // 操作模式: vl(视觉分析), eb(向量嵌入), textQuery(文本查询)
+	TopN        int    // textQuery模式返回的相似图片数量
 }
 
 // parseFlags 解析命令行参数
@@ -576,7 +577,8 @@ func parseFlags() *Config {
 	flag.BoolVar(&cfg.ShowInfo, "info", false, "仅显示图片信息，不进行分析")
 	flag.StringVar(&cfg.OllamaURL, "ollama-url", "http://localhost:11434", "Ollama 服务地址")
 	flag.StringVar(&cfg.OllamaModel, "model", "qwen3-vl:4b", "Ollama 模型名称")
-	flag.StringVar(&cfg.Opt, "opt", "vl", "操作模式: vl(视觉分析) 或 eb(向量嵌入)")
+	flag.StringVar(&cfg.Opt, "opt", "vl", "操作模式: vl(视觉分析), eb(向量嵌入), textQuery(文本查询)")
+	flag.IntVar(&cfg.TopN, "topN", 10, "textQuery模式返回的相似图片数量")
 
 	flag.Parse()
 	return cfg
@@ -598,8 +600,8 @@ func setupAndValidate() *AppContext {
 	// 解析命令行参数
 	cfg := parseFlags()
 
-	// 检查必需参数：-fpath 或 -dir 必须提供一个
-	if cfg.ImagePath == "" && cfg.DirPath == "" {
+	// 检查必需参数：-fpath 或 -dir 必须提供一个（textQuery模式除外）
+	if cfg.ImagePath == "" && cfg.DirPath == "" && cfg.Opt != "textQuery" {
 		fmt.Fprintf(os.Stderr, "错误: 缺少必需参数，请提供 -fpath（图片路径）或 -dir（文件夹路径）\n\n")
 		flag.Usage()
 		os.Exit(1)
@@ -874,6 +876,12 @@ func main() {
 	appCtx := setupAndValidate()
 	defer Logger.Sync()
 
+	// textQuery 模式特殊处理，不需要图片路径
+	if appCtx.Config.Opt == "textQuery" {
+		processTextQueryMode(appCtx)
+		return
+	}
+
 	// 判断是单文件模式还是文件夹模式
 	if appCtx.Config.DirPath != "" {
 		// 文件夹扫描模式
@@ -894,9 +902,12 @@ func processSingleFileMode(appCtx *AppContext) {
 	case "vl", "":
 		// 视觉分析模式（默认）：使用 Ollama 分析图片
 		processVisionMode(appCtx)
+	case "textQuery":
+		// 文本查询模式：根据文本搜索相似图片
+		processTextQueryMode(appCtx)
 	default:
 		fmt.Fprintf(os.Stderr, "错误: 不支持的操作模式: %s\n", appCtx.Config.Opt)
-		fmt.Fprintf(os.Stderr, "支持的模式: vl(视觉分析), eb(向量嵌入)\n")
+		fmt.Fprintf(os.Stderr, "支持的模式: vl(视觉分析), eb(向量嵌入), textQuery(文本查询)\n")
 		os.Exit(1)
 	}
 }
@@ -941,6 +952,13 @@ func processDirectoryMode(appCtx *AppContext) {
 	}
 
 	fmt.Printf("\n文件夹处理完成，共处理 %d 个文件\n", len(imageFiles))
+}
+
+// processTextQueryDirectoryMode 文件夹模式的文本查询处理
+// 注意：textQuery 模式不需要扫描文件夹，直接在单文件模式下处理
+func processTextQueryDirectoryMode(appCtx *AppContext) {
+	// textQuery 模式在文件夹下也使用相同的处理逻辑
+	processTextQueryMode(appCtx)
 }
 
 // scanDirectoryForImages 扫描文件夹中的图片文件
@@ -1332,6 +1350,18 @@ func processEmbeddingMode(appCtx *AppContext) {
 		}
 		fmt.Printf("成功保存 %d 个人脸向量到数据库\n", count)
 	}
+
+	// 5. 保存文件索引
+	fileIndex := &FileIndex{
+		MD5:      basicInfo.MD5,
+		FilePath: appCtx.Config.ImagePath,
+	}
+	if err := appCtx.DB.InsertFileIndex(fileIndex); err != nil {
+		Logger.Errorw("插入文件索引失败", "error", err)
+		fmt.Fprintf(os.Stderr, "错误: 插入文件索引失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("文件索引已保存")
 
 	fmt.Println("\n向量嵌入处理完成")
 	fmt.Printf("MD5: %s\n", basicInfo.MD5)

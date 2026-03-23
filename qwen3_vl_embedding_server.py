@@ -114,6 +114,56 @@ def process_image_to_vector(image: Image.Image) -> list[float]:
     return embeddings[0].tolist()
 
 
+def process_text_to_vector(text: str) -> list[float]:
+    """
+    处理文本并返回向量
+    
+    Args:
+        text: 输入文本
+    
+    Returns:
+        向量列表
+    """
+    global model, processor, tokenizer
+    
+    if model is None or processor is None or tokenizer is None:
+        raise RuntimeError("模型未加载")
+    
+    # 构建对话格式
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+            ],
+        }
+    ]
+    
+    # 处理输入 - 使用 tokenizer 的 apply_chat_template
+    text_with_template = tokenizer.apply_chat_template(
+        messages, 
+        tokenize=False, 
+        add_generation_prompt=True
+    )
+    
+    inputs = processor(  # type: ignore[operator]
+        text=[text_with_template], 
+        return_tensors="pt", 
+        padding=True
+    )
+    
+    # 移动到 GPU
+    inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+    
+    # 推理
+    with torch.no_grad():
+        outputs = model(**inputs)  # type: ignore[operator]
+        # 获取 [CLS] token 的嵌入作为文本向量
+        embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+    
+    return embeddings[0].tolist()
+
+
 @app.route("/api/embed", methods=["POST"])
 def embed() -> tuple[Any, int]:
     """
@@ -189,6 +239,51 @@ def embeddings() -> tuple[Any, int]:
     return embed()
 
 
+@app.route("/api/embed_text", methods=["POST"])
+def embed_text() -> tuple[Any, int]:
+    """
+    文本向量化接口
+    
+    请求格式：
+    {
+        "model": "qwen3-vl-embedding-8b",
+        "input": "要向量化的文本"
+    }
+    """
+    start_time = time.time()
+    
+    try:
+        # 解析 JSON 请求
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "请求体不能为空"}), 400
+        
+        # 获取文本数据
+        text_input = data.get("input") or data.get("text")
+        
+        if not text_input:
+            return jsonify({"error": "缺少文本数据（input 或 text 字段）"}), 400
+        
+        if not isinstance(text_input, str):
+            return jsonify({"error": "文本数据必须是字符串"}), 400
+        
+        # 处理文本获取向量
+        embedding = process_text_to_vector(text_input)
+        
+        total_duration = int((time.time() - start_time) * 1e9)  # 转换为纳秒
+        
+        # 返回结果（类似 Ollama 格式）
+        return jsonify({
+            "model": "qwen3-vl-embedding-8b",
+            "embeddings": [embedding],
+            "total_duration": total_duration,
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/tags", methods=["GET"])
 def tags() -> Any:
     """
@@ -234,6 +329,7 @@ def index() -> Any:
         "endpoints": {
             "POST /api/embed": "图片向量化（支持 base64 或文件上传）",
             "POST /api/embeddings": "OpenAI 兼容的 embeddings 接口",
+            "POST /api/embed_text": "文本向量化",
             "GET /api/tags": "获取可用模型列表",
             "GET /api/health": "健康检查"
         }

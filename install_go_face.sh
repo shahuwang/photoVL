@@ -30,56 +30,53 @@ fi
 
 echo "检测到操作系统: $OS"
 
-# 安装系统依赖
+# 检查系统依赖
 echo ""
-echo "[1/4] 安装系统依赖..."
+echo "[1/4] 检查系统依赖..."
 
-if [ "$OS" == "linux" ]; then
-    if [ "$DISTRO" == "debian" ]; then
-        # Debian/Ubuntu
-        echo "正在安装 Debian/Ubuntu 依赖..."
-        sudo apt-get update
-        sudo apt-get install -y \
-            libdlib-dev \
-            libblas-dev \
-            libatlas-base-dev \
-            liblapack-dev \
-            libjpeg-turbo8-dev \
-            cmake \
-            build-essential
-    elif [ "$DISTRO" == "redhat" ]; then
-        # CentOS/RHEL/Fedora
-        echo "正在安装 RedHat 系依赖..."
-        sudo yum install -y \
-            dlib-devel \
-            blas-devel \
-            atlas-devel \
-            lapack-devel \
-            libjpeg-turbo-devel \
-            cmake \
-            gcc-c++ \
-            make
-    else
-        echo "未知的 Linux 发行版，请手动安装以下依赖:"
-        echo "  - dlib (>= 19.10)"
-        echo "  - libblas"
-        echo "  - libatlas"
-        echo "  - liblapack"
-        echo "  - libjpeg"
-        echo "  - cmake"
-        exit 1
+# 检查 dlib 是否已安装
+check_dlib() {
+    if [ -f "/usr/include/dlib/dlib_include_path_tutorial.txt" ] || [ -f "/usr/local/include/dlib/dlib_include_path_tutorial.txt" ]; then
+        return 0
     fi
-elif [ "$OS" == "macos" ]; then
-    # macOS
-    if ! command -v brew &> /dev/null; then
-        echo "未检测到 Homebrew，请先安装: https://brew.sh"
-        exit 1
+    # 检查 pkg-config
+    if command -v pkg-config &> /dev/null && pkg-config --exists dlib-1 2>/dev/null; then
+        return 0
     fi
-    echo "正在安装 macOS 依赖..."
-    brew install dlib
+    return 1
+}
+
+if check_dlib; then
+    echo "✓ dlib 开发库已安装"
+else
+    echo "! dlib 开发库未检测到"
+    echo ""
+    echo "请手动安装以下系统依赖:"
+    echo ""
+    if [ "$OS" == "linux" ]; then
+        if [ "$DISTRO" == "debian" ]; then
+            echo "  sudo apt-get update"
+            echo "  sudo apt-get install -y libdlib-dev libblas-dev libatlas-base-dev liblapack-dev libjpeg-turbo8-dev cmake build-essential"
+        elif [ "$DISTRO" == "redhat" ]; then
+            echo "  sudo yum install -y dlib-devel blas-devel atlas-devel lapack-devel libjpeg-turbo-devel cmake gcc-c++ make"
+        else
+            echo "  - dlib (>= 19.10)"
+            echo "  - libblas"
+            echo "  - libatlas"
+            echo "  - liblapack"
+            echo "  - libjpeg"
+            echo "  - cmake"
+            echo "  - build-essential"
+        fi
+    elif [ "$OS" == "macos" ]; then
+        echo "  brew install dlib"
+    fi
+    echo ""
+    echo "安装完成后重新运行此脚本"
+    exit 1
 fi
 
-echo "系统依赖安装完成"
+echo "✓ 系统依赖检查通过"
 
 # 创建模型目录
 echo ""

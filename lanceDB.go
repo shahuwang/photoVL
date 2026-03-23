@@ -940,22 +940,7 @@ func (m *LanceDBManager) parseImageMetadata(data map[string]interface{}) (*Image
 	result.UpdateTime = parseTimestampFromArrow(data["update_time"])
 
 	// 解析向量
-	if v, ok := data["image_vector"].(arrow.Array); ok {
-		// 从 Arrow FixedSizeListArray 解析向量
-		if listArr, ok := v.(*array.FixedSizeList); ok {
-			if listArr.Len() > 0 && !listArr.IsNull(0) {
-				// 获取值数组的起始和结束偏移
-				start, end := listArr.ValueOffsets(0)
-				values := listArr.ListValues()
-				if floatArr, ok := values.(*array.Float32); ok {
-					result.ImageVector = make([]float32, end-start)
-					for i := int64(0); i < end-start; i++ {
-						result.ImageVector[i] = floatArr.Value(int(start + i))
-					}
-				}
-			}
-		}
-	}
+	result.ImageVector = parseVectorField(data["image_vector"])
 
 	return result, nil
 }
@@ -968,6 +953,55 @@ func unmarshalFloat32Slice(s string) []float32 {
 	var result []float32
 	json.Unmarshal([]byte(s), &result)
 	return result
+}
+
+// parseVectorField 解析向量字段，支持多种类型
+func parseVectorField(v interface{}) []float32 {
+	if v == nil {
+		return nil
+	}
+
+	switch vec := v.(type) {
+	case []float32:
+		return vec
+	case []float64:
+		result := make([]float32, len(vec))
+		for i, f := range vec {
+			result[i] = float32(f)
+		}
+		return result
+	case []interface{}:
+		result := make([]float32, len(vec))
+		for i, val := range vec {
+			switch f := val.(type) {
+			case float32:
+				result[i] = f
+			case float64:
+				result[i] = float32(f)
+			case int:
+				result[i] = float32(f)
+			case int64:
+				result[i] = float32(f)
+			}
+		}
+		return result
+	case arrow.Array:
+		// 从 Arrow FixedSizeListArray 解析向量
+		if listArr, ok := vec.(*array.FixedSizeList); ok {
+			if listArr.Len() > 0 && !listArr.IsNull(0) {
+				start, end := listArr.ValueOffsets(0)
+				values := listArr.ListValues()
+				if floatArr, ok := values.(*array.Float32); ok {
+					result := make([]float32, end-start)
+					for i := int64(0); i < end-start; i++ {
+						result[i] = floatArr.Value(int(start + i))
+					}
+					return result
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // parseTimestampFromArrow 从 Arrow 数组或值解析时间戳
@@ -1027,4 +1061,35 @@ func (m *LanceDBManager) parseFaceVector(data map[string]interface{}) (*FaceVect
 // GetDefaultDBPath 获取默认数据库路径
 func GetDefaultDBPath() string {
 	return "./photoVL_db"
+}
+
+// GetAllImageMetadataWithVector 获取所有有图片向量的元数据
+// 用于文本查询时的向量相似度搜索
+func (m *LanceDBManager) GetAllImageMetadataWithVector() ([]*ImageMetadata, error) {
+	tbl, err := m.db.OpenTable(m.ctx, TableImageMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open table %s: %w", TableImageMetadata, err)
+	}
+	defer tbl.Close()
+
+	// 查询所有记录（LanceDB 目前不支持向量字段的过滤查询）
+	// 我们获取所有记录，然后在内存中过滤
+	results, err := tbl.SelectWithFilter(m.ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query image metadata: %w", err)
+	}
+
+	var metadataList []*ImageMetadata
+	for _, r := range results {
+		meta, err := m.parseImageMetadata(r)
+		if err != nil {
+			continue
+		}
+		// 只保留有向量的记录
+		if len(meta.ImageVector) > 0 {
+			metadataList = append(metadataList, meta)
+		}
+	}
+
+	return metadataList, nil
 }
